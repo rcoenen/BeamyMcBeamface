@@ -203,8 +203,6 @@ struct TranscodeTest: ParsableCommand {
 class TranscoderTUI: @unchecked Sendable {
     private let server: TranscodeServer
     private let duration: TimeInterval
-    private var currentPosition: TimeInterval = 0
-    private var isPlaying = true
     private var needsRedraw = true
 
     private var oldTermios: termios?
@@ -213,8 +211,13 @@ class TranscoderTUI: @unchecked Sendable {
         self.server = server
         self.duration = duration
 
+        // Listen for state changes from server
+        server.onStateChanged = { [weak self] isPaused, position in
+            self?.needsRedraw = true
+        }
+
+        // Keep progress callback for backward compatibility / debugging
         server.onProgress = { [weak self] position in
-            self?.currentPosition = position
             self?.needsRedraw = true
         }
     }
@@ -262,7 +265,7 @@ class TranscoderTUI: @unchecked Sendable {
             case 32: // Spacebar
                 if inputBuffer.isEmpty {
                     // Only toggle if not typing a command
-                    togglePlayPause()
+                    server.togglePlayPause()
                 } else {
                     // Add space to command being typed
                     inputBuffer.append(" ")
@@ -284,13 +287,8 @@ class TranscoderTUI: @unchecked Sendable {
                 if cmd.hasPrefix("s ") {
                     let timeStr = String(cmd.dropFirst(2))
                     if let seconds = Double(timeStr) {
-                        let wasPlaying = isPlaying
+                        // Seek method now handles pause state preservation automatically
                         server.seek(to: seconds)
-                        if !wasPlaying {
-                            usleep(100_000)
-                            server.pause()
-                            isPlaying = false
-                        }
                     }
                 }
                 inputBuffer = ""
@@ -318,6 +316,10 @@ class TranscoderTUI: @unchecked Sendable {
         print("\u{001B}7", terminator: "") // Save cursor position
         print("\u{001B}[1;1H", terminator: "") // Move to line 1, col 1
 
+        // Query server for current state - server is single source of truth
+        let currentPosition = server.currentPosition
+        let isPaused = server.isPaused
+
         let percent = duration > 0 ? (currentPosition / duration) * 100 : 0
         let barWidth = 50
         let filled = Int((currentPosition / max(1, duration)) * Double(barWidth))
@@ -328,7 +330,7 @@ class TranscoderTUI: @unchecked Sendable {
         // Status icon shows NEXT action (not current state)
         // Playing → show pause icon (will pause when pressed)
         // Paused → show play icon (will play when pressed)
-        let statusIcon = isPlaying ? "⏸".yellow : "▶".green
+        let statusIcon = isPaused ? "▶".green : "⏸".yellow
         let timeDisplay = "\(formatTime(currentPosition).bold) / \(formatTime(duration))"
         let percentDisplay = "(\(String(format: "%.1f", percent).yellow)%)"
 
@@ -364,16 +366,6 @@ class TranscoderTUI: @unchecked Sendable {
         // Run async so we don't block
         DispatchQueue.global(qos: .userInitiated).async {
             try? task.run()
-        }
-    }
-
-    private func togglePlayPause() {
-        if isPlaying {
-            server.pause()
-            isPlaying = false
-        } else {
-            server.resume()
-            isPlaying = true
         }
     }
 

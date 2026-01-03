@@ -24,6 +24,42 @@ public final class TranscodeServer: @unchecked Sendable {
     private var outputPipe: Pipe?
     private var stderrPipe: Pipe?
 
+    // MARK: - Playback State (Single Source of Truth)
+
+    /// Current pause state - true if FFmpeg is paused (SIGSTOP)
+    public private(set) var isPaused: Bool = false
+
+    /// Position where last seek occurred (or 0 if never seeked)
+    private var seekPosition: TimeInterval = 0
+
+    /// Wall-clock time when playback started (after buffering)
+    private var playbackStartTime: Date?
+
+    /// Total time spent paused (accumulated across all pause/resume cycles)
+    private var accumulatedPauseTime: TimeInterval = 0
+
+    /// Wall-clock time when current pause started
+    private var pauseStartTime: Date?
+
+    /// Current playback position based on wall-clock time
+    /// This reflects what the user sees, not FFmpeg's encoding position
+    public var currentPosition: TimeInterval {
+        guard let startTime = playbackStartTime else {
+            return seekPosition
+        }
+
+        if isPaused, let pauseStart = pauseStartTime {
+            // Paused: return position when pause started
+            return seekPosition + pauseStart.timeIntervalSince(startTime) - accumulatedPauseTime
+        } else {
+            // Playing: return current wall-clock position
+            return seekPosition + Date().timeIntervalSince(startTime) - accumulatedPauseTime
+        }
+    }
+
+    /// Callback for state changes (isPaused, currentPosition)
+    public var onStateChanged: ((_ isPaused: Bool, _ position: TimeInterval) -> Void)?
+
     // Debug logging to file
     private static let debugLog: FileHandle? = {
         let logPath = "/tmp/beamy-transcoder-debug.log"
@@ -284,6 +320,12 @@ public final class TranscodeServer: @unchecked Sendable {
         do {
             try ffmpeg.run()
             self.ffmpegProcess = ffmpeg
+
+            // Initialize playback start time if this is first playback
+            if playbackStartTime == nil {
+                playbackStartTime = Date()
+            }
+
             log("FFmpeg started at position \(formatTime(position))")
         } catch {
             log("Failed to start FFmpeg: \(error)")
@@ -312,24 +354,56 @@ public final class TranscodeServer: @unchecked Sendable {
     }
 
     public func pause() {
-        guard let process = ffmpegProcess, process.isRunning else { return }
+        guard !isPaused, let process = ffmpegProcess, process.isRunning else { return }
+
+        isPaused = true
+        pauseStartTime = Date()
         kill(process.processIdentifier, SIGSTOP)
-        log("Paused (SIGSTOP)")
+
+        let position = currentPosition
+        onStateChanged?(isPaused, position)
+        log("Paused at \(formatTime(position))")
     }
 
     public func resume() {
-        guard let process = ffmpegProcess, process.isRunning else { return }
+        guard isPaused, let process = ffmpegProcess, process.isRunning else { return }
+
+        // Accumulate paused time
+        if let pauseStart = pauseStartTime {
+            accumulatedPauseTime += Date().timeIntervalSince(pauseStart)
+        }
+
+        isPaused = false
+        pauseStartTime = nil
         kill(process.processIdentifier, SIGCONT)
-        log("Resumed (SIGCONT)")
+
+        let position = currentPosition
+        onStateChanged?(isPaused, position)
+        log("Resumed at \(formatTime(position))")
+    }
+
+    /// Toggle between play and pause
+    public func togglePlayPause() {
+        if isPaused {
+            resume()
+        } else {
+            pause()
+        }
     }
 
     /// Seek to a new position by restarting FFmpeg
     /// The HTTP connection stays open - only FFmpeg restarts
     public func seek(to time: TimeInterval) {
+        let wasPaused = isPaused
+
         log("Seeking to \(formatTime(time))...")
 
-        // Store new position
-        currentSeekPosition = time
+        // Update position tracking
+        seekPosition = time
+        currentSeekPosition = time  // Keep for backward compatibility with progress parsing
+        playbackStartTime = Date()
+        accumulatedPauseTime = 0
+        pauseStartTime = nil
 
         // Stop current FFmpeg
         if let process = ffmpegProcess, process.isRunning {
@@ -342,6 +416,16 @@ public final class TranscodeServer: @unchecked Sendable {
 
         // Start new FFmpeg at new position (same client socket)
         startFFmpeg(at: time)
+
+        // Restore pause state if needed
+        if wasPaused {
+            // Small delay for FFmpeg to start, then pause
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.pause()
+            }
+        }
+
+        onStateChanged?(isPaused, currentPosition)
     }
 
     private func getLocalIPAddress() -> String {

@@ -14,8 +14,6 @@ class CastingViewModel: ObservableObject {
     }
     @Published var currentFile: URL?
     @Published var mediaInfo: MediaInfo?
-    @Published var isPlaying = false
-    @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
     @Published var isCasting = false
     @Published var isDiscovering = false
@@ -25,7 +23,15 @@ class CastingViewModel: ObservableObject {
     var transcodeServer: TranscodeServer?
     private var isLoadingConfig = false
 
-    // Computed properties for UI
+    // Computed properties that query server state (single source of truth)
+    var isPlaying: Bool {
+        !(transcodeServer?.isPaused ?? true)
+    }
+
+    var currentTime: TimeInterval {
+        transcodeServer?.currentPosition ?? 0
+    }
+
     var progress: Double {
         duration > 0 ? currentTime / duration : 0
     }
@@ -123,14 +129,21 @@ class CastingViewModel: ObservableObject {
             self.transcodeServer = server
             print("[TRANSCODER] Server started at \(server.url)")
 
-            // Track transcoder progress
-            server.onProgress = { [weak self] time in
+            // Listen for state changes from server
+            server.onStateChanged = { [weak self] isPaused, position in
                 DispatchQueue.main.async {
-                    self?.currentTime = time
+                    // Trigger UI refresh by publishing objectWillChange
+                    self?.objectWillChange.send()
                 }
             }
 
-            isPlaying = true
+            // Keep progress callback for backward compatibility
+            server.onProgress = { [weak self] time in
+                DispatchQueue.main.async {
+                    self?.objectWillChange.send()
+                }
+            }
+
             print("[TRANSCODER] Ready! Playing at \(server.url)")
         } catch {
             print("[TRANSCODER] FAILED: \(error)")
@@ -168,46 +181,39 @@ class CastingViewModel: ObservableObject {
     }
 
     func togglePlayPause() {
-        if isPlaying {
-            pause()
-        } else {
-            play()
-        }
+        transcodeServer?.togglePlayPause()
     }
 
     func play() {
         transcodeServer?.resume()
-        isPlaying = true
     }
 
     func pause() {
         transcodeServer?.pause()
-        isPlaying = false
     }
 
     func skipForward() {
-        seek(to: currentTime + 10)
+        let newTime = currentTime + 10
+        transcodeServer?.seek(to: newTime)
     }
 
     func skipBackward() {
-        seek(to: max(0, currentTime - 10))
+        let newTime = max(0, currentTime - 10)
+        transcodeServer?.seek(to: newTime)
     }
 
     func seek(to time: TimeInterval) {
         transcodeServer?.seek(to: time)
-        currentTime = time
     }
 
     func seekToProgress(_ progress: Double) {
         let time = progress * duration
-        seek(to: time)
+        transcodeServer?.seek(to: time)
     }
 
     func stopPreview() {
         transcodeServer?.stop()
         transcodeServer = nil
-        isPlaying = false
-        currentTime = 0
     }
 
     static func formatTime(_ seconds: TimeInterval) -> String {
