@@ -1,10 +1,11 @@
 import ArgumentParser
+import BeamyKit
 import Foundation
 
 struct ConfigCmd: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "config",
-        abstract: "Manage Beamster configuration",
+        abstract: "Manage Beamy configuration",
         subcommands: [Show.self, Init.self, Path.self]
     )
 

@@ -1,7 +1,7 @@
 import Foundation
 
 /// A simple HTTP server that serves a static file
-final class StaticFileServer: @unchecked Sendable {
+public final class StaticFileServer: @unchecked Sendable {
     private let fileURL: URL
     private let port: Int
     private var serverSocket: Int32 = -1
@@ -9,11 +9,11 @@ final class StaticFileServer: @unchecked Sendable {
     private let fileData: Data
     private let mimeType: String
 
-    var url: URL {
+    public var url: URL {
         URL(string: "http://\(getLocalIPAddress()):\(port)/\(fileURL.lastPathComponent)")!
     }
 
-    init(file: URL, port: Int) throws {
+    public init(file: URL, port: Int) throws {
         self.fileURL = file
         self.port = port
 
@@ -130,7 +130,7 @@ final class StaticFileServer: @unchecked Sendable {
         }
     }
 
-    func stop() {
+    public func stop() {
         isRunning = false
         if serverSocket >= 0 {
             close(serverSocket)
@@ -185,13 +185,13 @@ final class StaticFileServer: @unchecked Sendable {
     }
 }
 
-enum StaticFileServerError: Error, CustomStringConvertible {
+public enum StaticFileServerError: Error, CustomStringConvertible {
     case fileNotFound(String)
     case socketCreationFailed
     case bindFailed(Int)
     case listenFailed
 
-    var description: String {
+    public var description: String {
         switch self {
         case .fileNotFound(let path):
             return "File not found: \(path)"

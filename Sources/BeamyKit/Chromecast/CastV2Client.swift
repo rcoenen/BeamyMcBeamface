@@ -3,7 +3,7 @@ import Network
 
 /// Cast V2 Protocol client for communicating with Chromecast devices
 /// Protocol: TLS on port 8009, protobuf message framing, JSON payloads
-final class CastV2Client: @unchecked Sendable {
+public final class CastV2Client: @unchecked Sendable {
     private let device: ChromecastDevice
     private var connection: NWConnection?
     private var transportId: String?
@@ -21,19 +21,19 @@ final class CastV2Client: @unchecked Sendable {
     // Default Media Receiver app ID
     private let defaultMediaReceiverAppId = "CC1AD845"
 
-    init(device: ChromecastDevice, verbose: Bool = true) {
+    public init(device: ChromecastDevice, verbose: Bool = true) {
         self.device = device
         self.verbose = verbose
     }
 
-    func log(_ message: String) {
+    public func log(_ message: String) {
         if verbose {
             let timestamp = ISO8601DateFormatter().string(from: Date())
             print("[\(timestamp)] \(message)")
         }
     }
 
-    func connect() throws {
+    public func connect() throws {
         log("Connecting to \(device.address):8009 via TLS...")
 
         let host = NWEndpoint.Host(device.address)
@@ -101,7 +101,7 @@ final class CastV2Client: @unchecked Sendable {
         log("Connected to Chromecast!")
     }
 
-    func launchDefaultMediaReceiver() throws {
+    public func launchDefaultMediaReceiver() throws {
         log("Launching Default Media Receiver (CC1AD845)...")
 
         requestId += 1
@@ -141,7 +141,7 @@ final class CastV2Client: @unchecked Sendable {
         log("Media receiver ready")
     }
 
-    func loadMedia(url: URL, contentType: String, title: String? = nil, isLive: Bool = false) throws {
+    public func loadMedia(url: URL, contentType: String, title: String? = nil, isLive: Bool = false) throws {
         guard let transportId = transportId else {
             throw CastV2Error.notConnected
         }
@@ -201,7 +201,7 @@ final class CastV2Client: @unchecked Sendable {
         Thread.sleep(forTimeInterval: 1)
     }
 
-    func disconnect() {
+    public func disconnect() {
         log("Disconnecting...")
 
         // Send CLOSE to receiver
@@ -462,14 +462,14 @@ final class CastV2Client: @unchecked Sendable {
     }
 }
 
-enum CastV2Error: Error, CustomStringConvertible {
+public enum CastV2Error: Error, CustomStringConvertible {
     case connectionTimeout
     case connectionFailed(String)
     case notConnected
     case encodingFailed
     case sendFailed(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .connectionTimeout:
             return "Connection timed out"

@@ -1,6 +1,6 @@
-# Beamster Configuration File
-# Copy this file to beamster.toml and customize as needed
-# Run `beamster config init` to auto-generate with detected paths
+# Beamy Configuration File (BeamyMcBeamface)
+# Copy this file to beamy.toml and customize as needed
+# Run `beamy config init` to auto-generate with detected paths
 
 [ffmpeg]
 # Path to ffmpeg binary (auto-detected if in PATH)

@@ -3,20 +3,32 @@
 import PackageDescription
 
 let package = Package(
-    name: "Beamster",
+    name: "Beamy",
     platforms: [
         .macOS(.v13)
+    ],
+    products: [
+        .library(name: "BeamyKit", targets: ["BeamyKit"]),
+        .executable(name: "beamy", targets: ["Beamy"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(url: "https://github.com/LebJe/TOMLKit", from: "0.5.0"),
     ],
     targets: [
-        .executableTarget(
-            name: "Beamster",
+        // Shared library
+        .target(
+            name: "BeamyKit",
             dependencies: [
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "TOMLKit", package: "TOMLKit"),
+            ]
+        ),
+        // CLI executable
+        .executableTarget(
+            name: "Beamy",
+            dependencies: [
+                "BeamyKit",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
     ]

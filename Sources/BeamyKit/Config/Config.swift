@@ -1,19 +1,19 @@
 import Foundation
 import TOMLKit
 
-struct Config: Codable {
-    var ffmpeg: FFmpegConfig
-    var server: ServerConfig
-    var chromecast: ChromecastConfig
+public struct Config: Codable {
+    public var ffmpeg: FFmpegConfig
+    public var server: ServerConfig
+    public var chromecast: ChromecastConfig
 
-    struct FFmpegConfig: Codable {
-        var ffmpegPath: String
-        var ffprobePath: String
-        var preset: String
-        var crf: Int
-        var audioBitrate: String
+    public struct FFmpegConfig: Codable {
+        public var ffmpegPath: String
+        public var ffprobePath: String
+        public var preset: String
+        public var crf: Int
+        public var audioBitrate: String
 
-        static var `default`: FFmpegConfig {
+        public static var `default`: FFmpegConfig {
             FFmpegConfig(
                 ffmpegPath: findExecutable("ffmpeg") ?? "/opt/homebrew/bin/ffmpeg",
                 ffprobePath: findExecutable("ffprobe") ?? "/opt/homebrew/bin/ffprobe",
@@ -24,11 +24,11 @@ struct Config: Codable {
         }
     }
 
-    struct ServerConfig: Codable {
-        var portRangeStart: Int
-        var portRangeEnd: Int
+    public struct ServerConfig: Codable {
+        public var portRangeStart: Int
+        public var portRangeEnd: Int
 
-        static var `default`: ServerConfig {
+        public static var `default`: ServerConfig {
             ServerConfig(
                 portRangeStart: 8080,
                 portRangeEnd: 9000
@@ -36,11 +36,11 @@ struct Config: Codable {
         }
     }
 
-    struct ChromecastConfig: Codable {
-        var discoveryTimeout: Double
-        var defaultDevice: String?
+    public struct ChromecastConfig: Codable {
+        public var discoveryTimeout: Double
+        public var defaultDevice: String?
 
-        static var `default`: ChromecastConfig {
+        public static var `default`: ChromecastConfig {
             ChromecastConfig(
                 discoveryTimeout: 5.0,
                 defaultDevice: nil
@@ -48,7 +48,7 @@ struct Config: Codable {
         }
     }
 
-    static var `default`: Config {
+    public static var `default`: Config {
         Config(
             ffmpeg: .default,
             server: .default,
@@ -56,15 +56,15 @@ struct Config: Codable {
         )
     }
 
-    static var configDirectory: URL {
+    public static var configDirectory: URL {
         URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     }
 
-    static var configPath: URL {
-        configDirectory.appendingPathComponent("beamster.toml")
+    public static var configPath: URL {
+        configDirectory.appendingPathComponent("beamy.toml")
     }
 
-    static func load() throws -> Config {
+    public static func load() throws -> Config {
         let path = configPath
 
         // If config doesn't exist, create it with defaults
@@ -81,7 +81,7 @@ struct Config: Codable {
         return try TOMLDecoder().decode(Config.self, from: table)
     }
 
-    func save() throws {
+    public func save() throws {
         let directory = Self.configDirectory
 
         // Create config directory if it doesn't exist
@@ -98,7 +98,7 @@ struct Config: Codable {
         try tomlString.write(to: Self.configPath, atomically: true, encoding: .utf8)
     }
 
-    func toTOMLString() -> String {
+    public func toTOMLString() -> String {
         do {
             let table = try TOMLEncoder().encode(self)
             return table.description

@@ -1,13 +1,13 @@
 import Foundation
 
-struct MediaInfo {
-    let duration: Double
-    let videoCodec: String?
-    let audioCodec: String?
-    let width: Int?
-    let height: Int?
+public struct MediaInfo {
+    public let duration: Double
+    public let videoCodec: String?
+    public let audioCodec: String?
+    public let width: Int?
+    public let height: Int?
 
-    var durationFormatted: String {
+    public var durationFormatted: String {
         let hours = Int(duration) / 3600
         let minutes = (Int(duration) % 3600) / 60
         let seconds = Int(duration) % 60
@@ -17,7 +17,7 @@ struct MediaInfo {
         return String(format: "%d:%02d", minutes, seconds)
     }
 
-    var needsTranscoding: Bool {
+    public var needsTranscoding: Bool {
         // Chromecast supports H.264, VP8, VP9 for video
         // and AAC, MP3, Vorbis, Opus for audio
         let supportedVideoCodecs = ["h264", "vp8", "vp9"]
@@ -30,12 +30,12 @@ struct MediaInfo {
     }
 }
 
-enum FFmpeg {
+public enum FFmpeg {
     private static var config: Config.FFmpegConfig {
         (try? Config.load().ffmpeg) ?? .default
     }
 
-    static func isAvailable() -> Bool {
+    public static func isAvailable() -> Bool {
         FileManager.default.fileExists(atPath: config.ffmpegPath)
     }
 
@@ -47,7 +47,7 @@ enum FFmpeg {
         config.ffprobePath
     }
 
-    static func getMediaInfo(file: URL) throws -> MediaInfo {
+    public static func getMediaInfo(file: URL) throws -> MediaInfo {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: getFFprobePath())
         process.arguments = [
@@ -103,7 +103,7 @@ enum FFmpeg {
         )
     }
 
-    static func transcode(
+    public static func transcode(
         input: URL,
         output: URL,
         onProgress: ((Double) -> Void)? = nil
@@ -138,7 +138,7 @@ enum FFmpeg {
     }
 
     /// Start an HTTP server that streams transcoded content on-the-fly
-    static func startStreamingTranscode(
+    public static func startStreamingTranscode(
         input: URL,
         port: Int,
         mediaInfo: MediaInfo
@@ -147,12 +147,12 @@ enum FFmpeg {
     }
 }
 
-enum FFmpegError: Error, CustomStringConvertible {
+public enum FFmpegError: Error, CustomStringConvertible {
     case notFound
     case invalidOutput
     case transcodingFailed(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .notFound:
             return "FFmpeg not found"

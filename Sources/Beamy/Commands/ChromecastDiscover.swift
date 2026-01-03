@@ -1,4 +1,5 @@
 import ArgumentParser
+import BeamyKit
 import Foundation
 
 struct ChromecastDiscover: ParsableCommand {
@@ -21,7 +22,7 @@ struct ChromecastDiscover: ParsableCommand {
                 printNoDevicesFoundHelp()
             } else {
                 print("No video-capable Chromecast devices found.")
-                print("Found \(allDevices.count) audio-only device(s), but Beamster requires a display.")
+                print("Found \(allDevices.count) audio-only device(s), but Beamy requires a display.")
             }
             return
         }

@@ -2,10 +2,10 @@ import ArgumentParser
 import Foundation
 
 @main
-struct Beamster: ParsableCommand {
+struct Beamy: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "beamster",
-        abstract: "Cast media files to Chromecast devices",
+        commandName: "beamy",
+        abstract: "BeamyMcBeamface - Cast media files to Chromecast devices",
         version: "0.1.0",
         subcommands: [Cast.self, CastTest.self, Devices.self, ConfigCmd.self, ChromecastDiscover.self, FFmpegDiscover.self]
     )

@@ -1,7 +1,7 @@
 import Foundation
 
 /// A simple HTTP server that serves transcoded media content
-final class TranscodeServer: @unchecked Sendable {
+public final class TranscodeServer: @unchecked Sendable {
     private let input: URL
     private let port: Int
     private let mediaInfo: MediaInfo
@@ -9,11 +9,11 @@ final class TranscodeServer: @unchecked Sendable {
     private var isRunning = false
     private var ffmpegProcess: Process?
 
-    var url: URL {
+    public var url: URL {
         URL(string: "http://\(getLocalIPAddress()):\(port)/stream.mp4")!
     }
 
-    init(input: URL, port: Int, mediaInfo: MediaInfo) throws {
+    public init(input: URL, port: Int, mediaInfo: MediaInfo) throws {
         self.input = input
         self.port = port
         self.mediaInfo = mediaInfo
@@ -139,7 +139,7 @@ final class TranscodeServer: @unchecked Sendable {
         }
     }
 
-    func stop() {
+    public func stop() {
         isRunning = false
         ffmpegProcess?.terminate()
         if serverSocket >= 0 {
@@ -195,12 +195,12 @@ final class TranscodeServer: @unchecked Sendable {
     }
 }
 
-enum TranscodeServerError: Error, CustomStringConvertible {
+public enum TranscodeServerError: Error, CustomStringConvertible {
     case socketCreationFailed
     case bindFailed(Int)
     case listenFailed
 
-    var description: String {
+    public var description: String {
         switch self {
         case .socketCreationFailed:
             return "Failed to create socket"

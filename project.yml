@@ -1,0 +1,54 @@
+name: BeamyMcBeamface
+
+options:
+  bundleIdPrefix: com.beamy
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+
+packages:
+  Beamy:
+    path: .
+
+targets:
+  BeamyMcBeamface:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/BeamyApp
+    dependencies:
+      - package: Beamy
+        product: BeamyKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.beamy.mcbeamface
+        PRODUCT_NAME: Beamy McBeamface
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: Sources/BeamyApp/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+        SWIFT_VERSION: "6.0"
+        ENABLE_HARDENED_RUNTIME: YES
+        GENERATE_INFOPLIST_FILE: NO
+    entitlements:
+      path: Sources/BeamyApp/BeamyMcBeamface.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+
+schemes:
+  BeamyMcBeamface:
+    build:
+      targets:
+        BeamyMcBeamface: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    archive:
+      config: Release

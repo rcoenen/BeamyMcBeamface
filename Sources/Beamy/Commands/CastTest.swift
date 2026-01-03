@@ -1,4 +1,5 @@
 import ArgumentParser
+import BeamyKit
 import Foundation
 
 struct CastTest: ParsableCommand {

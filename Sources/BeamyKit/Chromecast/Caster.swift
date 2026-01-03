@@ -1,16 +1,16 @@
 import Foundation
 
-class Caster {
+public class Caster {
     private let device: ChromecastDevice
     private let verbose: Bool
     private var transcodeServer: TranscodeServer?
 
-    init(device: ChromecastDevice, verbose: Bool = false) {
+    public init(device: ChromecastDevice, verbose: Bool = false) {
         self.device = device
         self.verbose = verbose
     }
 
-    func cast(file: URL, mediaInfo: MediaInfo) throws {
+    public func cast(file: URL, mediaInfo: MediaInfo) throws {
         // Ignore SIGPIPE - we handle broken pipes via send() return values
         signal(SIGPIPE, SIG_IGN)
 
@@ -105,14 +105,14 @@ class Caster {
 }
 
 /// Handles the Cast protocol connection to a Chromecast device
-class CastConnection {
+public class CastConnection {
     private let device: ChromecastDevice
 
-    init(device: ChromecastDevice) {
+    public init(device: ChromecastDevice) {
         self.device = device
     }
 
-    func connect() throws {
+    public func connect() throws {
         // For now, use a simpler approach via the REST API
         // The full Cast protocol requires TLS + Protobuf which is complex
 
@@ -139,7 +139,7 @@ class CastConnection {
         }
     }
 
-    func launchMedia(url: URL) throws {
+    public func launchMedia(url: URL) throws {
         // Launch the default media receiver app
         let launchURL = URL(string: "http://\(device.address):8008/apps/CC1AD845")!
         var request = URLRequest(url: launchURL, timeoutInterval: 10)
@@ -196,7 +196,7 @@ class CastConnection {
         }
     }
 
-    func stop() {
+    public func stop() {
         // Stop playback
         let stopURL = URL(string: "http://\(device.address):8008/apps/CC1AD845")!
         var request = URLRequest(url: stopURL, timeoutInterval: 5)
@@ -207,12 +207,12 @@ class CastConnection {
     }
 }
 
-enum CastError: Error, CustomStringConvertible {
+public enum CastError: Error, CustomStringConvertible {
     case connectionFailed(String)
     case launchFailed(String)
     case mediaLoadFailed(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .connectionFailed(let msg):
             return "Failed to connect to device: \(msg)"

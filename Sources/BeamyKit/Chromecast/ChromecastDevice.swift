@@ -1,20 +1,20 @@
 import Foundation
 
-enum CastType: String, Sendable {
+public enum CastType: String, Sendable {
     case video = "video"
     case audio = "audio"
     case group = "group"
     case unknown = "unknown"
 }
 
-struct ChromecastDevice: Sendable {
-    let name: String
-    let address: String
-    let port: Int
-    let id: String
-    let model: String?
+public struct ChromecastDevice: Sendable, Hashable, Equatable {
+    public let name: String
+    public let address: String
+    public let port: Int
+    public let id: String
+    public let model: String?
 
-    init(name: String, address: String, port: Int, id: String, model: String? = nil) {
+    public init(name: String, address: String, port: Int, id: String, model: String? = nil) {
         self.name = name
         self.address = address
         self.port = port
@@ -23,7 +23,7 @@ struct ChromecastDevice: Sendable {
     }
 
     /// Determines the device type based on model name and port
-    var castType: CastType {
+    public var castType: CastType {
         // Groups use non-standard ports
         if port != 8009 {
             return .group
@@ -96,17 +96,17 @@ struct ChromecastDevice: Sendable {
     }
 
     /// Returns true if the device supports video playback
-    var isVideoCapable: Bool {
+    public var isVideoCapable: Bool {
         castType == .video
     }
 
     /// Returns true if the device is audio-only
-    var isAudioOnly: Bool {
+    public var isAudioOnly: Bool {
         castType == .audio
     }
 
     /// Human-readable capability description
-    var capabilityDescription: String {
+    public var capabilityDescription: String {
         switch castType {
         case .video:
             return "Video + Audio"

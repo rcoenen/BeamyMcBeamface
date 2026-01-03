@@ -1,14 +1,14 @@
 import Foundation
 
-enum ChromecastDiscovery {
+public enum ChromecastDiscovery {
     /// Discover Chromecast devices on the local network using mDNS
-    static func discover(timeout: Double = 5.0) throws -> [ChromecastDevice] {
+    public static func discover(timeout: Double = 5.0) throws -> [ChromecastDevice] {
         let browser = MDNSBrowser()
         return browser.discover(timeout: timeout)
     }
 
     /// Find a specific device by name or IP
-    static func findDevice(named nameOrIP: String, timeout: Double = 5.0) throws -> ChromecastDevice? {
+    public static func findDevice(named nameOrIP: String, timeout: Double = 5.0) throws -> ChromecastDevice? {
         // First check if it's an IP address
         if isIPAddress(nameOrIP) {
             // Try to connect directly
