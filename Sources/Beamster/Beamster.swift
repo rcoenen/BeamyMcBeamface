@@ -7,6 +7,6 @@ struct Beamster: ParsableCommand {
         commandName: "beamster",
         abstract: "Cast media files to Chromecast devices",
         version: "0.1.0",
-        subcommands: [Cast.self, CastTest.self, Devices.self, ConfigCmd.self, ChromecastDiscover.self]
+        subcommands: [Cast.self, CastTest.self, Devices.self, ConfigCmd.self, ChromecastDiscover.self, FFmpegDiscover.self]
     )
 }
