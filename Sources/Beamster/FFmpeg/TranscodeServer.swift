@@ -10,7 +10,7 @@ final class TranscodeServer: @unchecked Sendable {
     private var ffmpegProcess: Process?
 
     var url: URL {
-        URL(string: "http://\(getLocalIPAddress()):\(port)/media.mp4")!
+        URL(string: "http://\(getLocalIPAddress()):\(port)/stream.mp4")!
     }
 
     init(input: URL, port: Int, mediaInfo: MediaInfo) throws {
@@ -88,27 +88,30 @@ final class TranscodeServer: @unchecked Sendable {
         let headers = """
         HTTP/1.1 200 OK\r
         Content-Type: video/mp4\r
-        Transfer-Encoding: chunked\r
         Access-Control-Allow-Origin: *\r
+        Cache-Control: no-cache\r
         Connection: close\r
         \r
 
         """
         _ = headers.withCString { send(clientSocket, $0, strlen($0), 0) }
 
-        // Start FFmpeg and pipe output to client
+        // Start FFmpeg - use H.264 baseline profile for maximum Chromecast compatibility
         let config = (try? Config.load().ffmpeg) ?? .default
         let ffmpeg = Process()
         ffmpeg.executableURL = URL(fileURLWithPath: config.ffmpegPath)
         ffmpeg.arguments = [
             "-i", input.path,
             "-c:v", "libx264",
+            "-profile:v", "baseline",
+            "-level", "3.1",
             "-preset", config.preset,
-            "-tune", "zerolatency",
             "-crf", "\(config.crf)",
             "-c:a", "aac",
+            "-ac", "2",
+            "-ar", "44100",
             "-b:a", config.audioBitrate,
-            "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+            "-movflags", "frag_keyframe+empty_moov+faststart",
             "-f", "mp4",
             "pipe:1"
         ]
@@ -127,15 +130,9 @@ final class TranscodeServer: @unchecked Sendable {
                 let data = fileHandle.availableData
                 if data.isEmpty { break }
 
-                // Send as chunked encoding
-                let chunkHeader = String(format: "%X\r\n", data.count)
-                _ = chunkHeader.withCString { send(clientSocket, $0, strlen($0), 0) }
+                // Send raw bytes directly (no chunked encoding)
                 _ = data.withUnsafeBytes { send(clientSocket, $0.baseAddress, data.count, 0) }
-                _ = "\r\n".withCString { send(clientSocket, $0, 2, 0) }
             }
-
-            // Send final chunk
-            _ = "0\r\n\r\n".withCString { send(clientSocket, $0, 5, 0) }
 
         } catch {
             // Connection closed or error

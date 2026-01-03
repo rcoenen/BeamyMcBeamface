@@ -48,13 +48,29 @@ struct Cast: ParsableCommand {
             }
             targetDevice = found
         } else {
-            print("Discovering Chromecast devices...")
-            let devices = try ChromecastDiscovery.discover(timeout: 5.0)
-            guard let first = devices.first else {
-                throw ValidationError("No Chromecast devices found on network")
+            // Check config for default device
+            if let config = try? Config.load(),
+               let defaultDevice = config.chromecast.defaultDevice {
+                print("Using default device: \(defaultDevice)...")
+                if let found = try ChromecastDiscovery.findDevice(named: defaultDevice, timeout: 5.0) {
+                    targetDevice = found
+                } else {
+                    print("Default device not found, discovering...")
+                    let devices = try ChromecastDiscovery.discover(timeout: 5.0).filter { $0.isVideoCapable }
+                    guard let first = devices.first else {
+                        throw ValidationError("No video-capable Chromecast devices found")
+                    }
+                    targetDevice = first
+                }
+            } else {
+                print("Discovering Chromecast devices...")
+                let devices = try ChromecastDiscovery.discover(timeout: 5.0).filter { $0.isVideoCapable }
+                guard let first = devices.first else {
+                    throw ValidationError("No video-capable Chromecast devices found")
+                }
+                targetDevice = first
+                print("Found: \(targetDevice.name)")
             }
-            targetDevice = first
-            print("Found: \(targetDevice.name)")
         }
 
         // Start transcoding and casting

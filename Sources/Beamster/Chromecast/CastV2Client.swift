@@ -141,7 +141,7 @@ final class CastV2Client: @unchecked Sendable {
         log("Media receiver ready")
     }
 
-    func loadMedia(url: URL, contentType: String, title: String? = nil) throws {
+    func loadMedia(url: URL, contentType: String, title: String? = nil, isLive: Bool = false) throws {
         guard let transportId = transportId else {
             throw CastV2Error.notConnected
         }
@@ -153,23 +153,27 @@ final class CastV2Client: @unchecked Sendable {
 
         var metadata: [String: Any] = [:]
 
-        // Determine metadata type based on content type
+        // Determine metadata type and stream type based on content type
+        let streamType: String
         if contentType.starts(with: "image/") {
             metadata["metadataType"] = 4 // PHOTO
-            if let title = title {
-                metadata["title"] = title
-            }
+            streamType = "NONE"
         } else if contentType.starts(with: "video/") {
             metadata["metadataType"] = 1 // MOVIE
-            if let title = title {
-                metadata["title"] = title
-            }
+            // Use LIVE for transcoded streams (no Content-Length), BUFFERED for files
+            streamType = isLive ? "LIVE" : "BUFFERED"
+        } else {
+            streamType = "BUFFERED"
+        }
+
+        if let title = title {
+            metadata["title"] = title
         }
 
         let media: [String: Any] = [
             "contentId": url.absoluteString,
             "contentType": contentType,
-            "streamType": contentType.starts(with: "image/") ? "NONE" : "BUFFERED",
+            "streamType": streamType,
             "metadata": metadata
         ]
 

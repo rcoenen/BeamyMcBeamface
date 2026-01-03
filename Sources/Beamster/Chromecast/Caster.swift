@@ -11,6 +11,9 @@ class Caster {
     }
 
     func cast(file: URL, mediaInfo: MediaInfo) throws {
+        // Ignore SIGPIPE - we handle broken pipes via send() return values
+        signal(SIGPIPE, SIG_IGN)
+
         // Start local transcode server
         let port = findAvailablePort()
 
@@ -30,29 +33,43 @@ class Caster {
             print("Stream URL: \(streamURL)")
         }
 
-        // Connect to Chromecast and start playback
+        // Connect to Chromecast using Cast v2 protocol
         print("Connecting to \(device.name)...")
 
-        let connection = try CastConnection(device: device)
-        try connection.connect()
+        let client = CastV2Client(device: device, verbose: verbose)
+        try client.connect()
 
         if verbose {
-            print("Connected, launching media...")
+            print("Connected, launching Default Media Receiver...")
         }
 
-        try connection.launchMedia(url: streamURL)
+        try client.launchDefaultMediaReceiver()
+
+        // Determine content type
+        let contentType = "video/mp4"
+        let title = file.deletingPathExtension().lastPathComponent
+
+        if verbose {
+            print("Loading media: \(title)")
+        }
+
+        // Use isLive=true for transcoded streams (no Content-Length, chunked encoding)
+        try client.loadMedia(url: streamURL, contentType: contentType, title: title, isLive: true)
 
         print("Now playing on \(device.name)")
         print("Press Ctrl+C to stop")
+        fflush(stdout)
 
         // Handle signals for cleanup
         signal(SIGINT) { _ in
             print("\nStopping...")
-            exit(0)
+            Darwin.exit(0)
         }
 
-        // Keep running until interrupted
-        dispatchMain()
+        // Keep running using RunLoop instead of dispatchMain
+        while true {
+            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 1.0))
+        }
     }
 
     deinit {
