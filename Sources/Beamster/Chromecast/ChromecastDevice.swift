@@ -1,5 +1,12 @@
 import Foundation
 
+enum CastType: String, Sendable {
+    case video = "video"
+    case audio = "audio"
+    case group = "group"
+    case unknown = "unknown"
+}
+
 struct ChromecastDevice: Sendable {
     let name: String
     let address: String
@@ -13,5 +20,102 @@ struct ChromecastDevice: Sendable {
         self.port = port
         self.id = id
         self.model = model
+    }
+
+    /// Determines the device type based on model name and port
+    var castType: CastType {
+        // Groups use non-standard ports
+        if port != 8009 {
+            return .group
+        }
+
+        guard let model = model?.lowercased() else {
+            return .unknown
+        }
+
+        // Video-capable devices (Chromecast, displays, TVs)
+        let videoModels = [
+            "chromecast",
+            "chromecast hd",
+            "chromecast ultra",
+            "eureka dongle",
+            "google nest hub",
+            "google nest hub max",
+            "lenovo smart display",
+            "nvidia shield",
+            "sony bravia",
+            "vizio",
+            "philips",
+            "xiaomi",
+            "mitv",
+        ]
+
+        for videoModel in videoModels {
+            if model.contains(videoModel) {
+                return .video
+            }
+        }
+
+        // Audio-only devices (speakers, soundbars)
+        let audioModels = [
+            "google home",
+            "nest audio",
+            "nest mini",
+            "nest wifi",
+            "chromecast audio",
+            "jbl link",
+            "bose",
+            "sonos",
+            "marshall",
+            "pioneer",
+            "canton",
+            "bang & olufsen",
+            "harman kardon",
+            "lg wk",
+            "thinq speaker",
+            "soundbar",
+            "speaker",
+        ]
+
+        for audioModel in audioModels {
+            if model.contains(audioModel) {
+                return .audio
+            }
+        }
+
+        // Check for common keywords
+        if model.contains("tv") || model.contains("display") || model.contains("hub") {
+            return .video
+        }
+
+        if model.contains("speaker") || model.contains("audio") || model.contains("sound") {
+            return .audio
+        }
+
+        return .unknown
+    }
+
+    /// Returns true if the device supports video playback
+    var isVideoCapable: Bool {
+        castType == .video
+    }
+
+    /// Returns true if the device is audio-only
+    var isAudioOnly: Bool {
+        castType == .audio
+    }
+
+    /// Human-readable capability description
+    var capabilityDescription: String {
+        switch castType {
+        case .video:
+            return "Video + Audio"
+        case .audio:
+            return "Audio Only"
+        case .group:
+            return "Speaker Group"
+        case .unknown:
+            return "Unknown"
+        }
     }
 }

@@ -44,29 +44,35 @@ private final class MDNSBrowser: NSObject, NetServiceBrowserDelegate, NetService
     private var services: [NetService] = []
     private var devices: [ChromecastDevice] = []
     private let lock = NSLock()
-    private var semaphore: DispatchSemaphore?
     private var resolvedCount = 0
     private var expectedCount = 0
+    private var isSearching = true
 
     func discover(timeout: Double) -> [ChromecastDevice] {
         devices = []
         services = []
         resolvedCount = 0
         expectedCount = 0
-        semaphore = DispatchSemaphore(value: 0)
+        isSearching = true
 
         browser.delegate = self
+        browser.schedule(in: .current, forMode: .default)
         browser.searchForServices(ofType: "_googlecast._tcp.", inDomain: "local.")
 
-        // Wait for discovery with timeout
-        _ = semaphore?.wait(timeout: .now() + timeout)
+        // Run the RunLoop until timeout or discovery complete
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while isSearching && Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+        }
+
+        // Wait for pending resolutions (up to 2 more seconds)
+        let resolutionDeadline = Date(timeIntervalSinceNow: 2.0)
+        while resolvedCount < expectedCount && Date() < resolutionDeadline {
+            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+        }
 
         browser.stop()
-
-        // Give a moment for any pending resolutions
-        if expectedCount > 0 && resolvedCount < expectedCount {
-            Thread.sleep(forTimeInterval: 0.5)
-        }
+        browser.remove(from: .current, forMode: .default)
 
         return devices
     }
@@ -74,31 +80,33 @@ private final class MDNSBrowser: NSObject, NetServiceBrowserDelegate, NetService
     // MARK: - NetServiceBrowserDelegate
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        lock.lock()
         services.append(service)
         expectedCount += 1
+        lock.unlock()
+
         service.delegate = self
         service.resolve(withTimeout: 5.0)
 
         if !moreComing {
-            // All services found, wait a bit for resolution
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.semaphore?.signal()
-            }
+            isSearching = false
         }
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
-        semaphore?.signal()
+        isSearching = false
     }
 
     func netServiceBrowserDidStopSearch(_ browser: NetServiceBrowser) {
-        // Search stopped
+        isSearching = false
     }
 
     // MARK: - NetServiceDelegate
 
     func netServiceDidResolveAddress(_ sender: NetService) {
+        lock.lock()
         resolvedCount += 1
+        lock.unlock()
 
         guard let addresses = sender.addresses, !addresses.isEmpty else { return }
 
@@ -147,6 +155,8 @@ private final class MDNSBrowser: NSObject, NetServiceBrowserDelegate, NetService
     }
 
     func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        lock.lock()
         resolvedCount += 1
+        lock.unlock()
     }
 }

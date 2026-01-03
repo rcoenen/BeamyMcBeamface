@@ -51,6 +51,10 @@ Currently, the project does not have a formal test suite. When adding tests:
 - Mock Chromecast devices for testing casting logic
 
 ### Git Workflow
+- **CRITICAL: NEVER create git commits unless explicitly instructed by the user**
+  - Do NOT automatically commit after completing tasks
+  - Do NOT suggest commits without explicit user request
+  - Only run `git add` and `git commit` when the user specifically asks for it
 - Configuration file (`beamster.toml`) is gitignored (users copy from `beamster.toml.example`)
 - Standard Swift build artifacts ignored (`.build/`, `.swiftpm/`, etc.)
 
