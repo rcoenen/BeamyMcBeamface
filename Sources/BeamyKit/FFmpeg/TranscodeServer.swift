@@ -24,6 +24,21 @@ public final class TranscodeServer: @unchecked Sendable {
     private var outputPipe: Pipe?
     private var stderrPipe: Pipe?
 
+    // Debug logging to file
+    private static let debugLog: FileHandle? = {
+        let logPath = "/tmp/beamy-transcoder-debug.log"
+        FileManager.default.createFile(atPath: logPath, contents: nil)
+        return FileHandle(forWritingAtPath: logPath)
+    }()
+
+    private func log(_ message: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            Self.debugLog?.write(data)
+        }
+    }
+
     /// Callback for progress updates (current time in seconds, source position)
     public var onProgress: (@Sendable (TimeInterval) -> Void)?
 
@@ -124,7 +139,7 @@ public final class TranscodeServer: @unchecked Sendable {
     /// Start FFmpeg at the given position and stream to current client socket
     private func startFFmpeg(at position: TimeInterval) {
         guard clientSocket >= 0 else {
-            print("[TRANSCODER] No client socket, cannot start FFmpeg")
+            log("No client socket, cannot start FFmpeg")
             return
         }
 
@@ -147,7 +162,8 @@ public final class TranscodeServer: @unchecked Sendable {
         args += ["-i", input.path]
 
         // Progress output to stderr (parsed for position feedback)
-        args += ["-progress", "pipe:2"]
+        // Update every 0.5 seconds for smooth UI updates
+        args += ["-progress", "pipe:2", "-stats_period", "0.5"]
 
         // Video settings
         args += [
@@ -178,7 +194,7 @@ public final class TranscodeServer: @unchecked Sendable {
         ]
 
         ffmpeg.arguments = args
-        print("[TRANSCODER] FFmpeg args: \(args.joined(separator: " "))")
+        log("FFmpeg args: \(args.joined(separator: " "))")
 
         // Store pipes at class level to prevent deallocation
         let newOutputPipe = Pipe()
@@ -217,25 +233,37 @@ public final class TranscodeServer: @unchecked Sendable {
         }
 
         // Parse stderr for progress
-        Thread.detachNewThread {
+        Thread.detachNewThread { [weak self] in
             stderrStarted.signal()  // Signal that we're ready to read
             var textBuffer = ""
-            while true {
+            // Keep reading while streaming is active
+            while self?.isStreaming == true {
                 let data = stderrHandle.availableData
-                if data.isEmpty { break }
+                if data.isEmpty {
+                    self?.log("Progress: No data, sleeping...")
+                    usleep(100_000) // Sleep 100ms and retry
+                    continue
+                }
                 if let text = String(data: data, encoding: .utf8) {
                     textBuffer += text
+                    self?.log("Progress received: \(text)")
 
                     // Parse out_time=HH:MM:SS.ffffff from -progress output
-                    if let range = textBuffer.range(of: "out_time=(\\d{2}):(\\d{2}):(\\d{2}\\.\\d+)", options: .regularExpression) {
+                    // Use raw string literal to avoid escaping issues
+                    if let range = textBuffer.range(of: #"out_time=(\d{2}):(\d{2}):(\d{2}\.\d+)"#, options: .regularExpression) {
                         let timeStr = textBuffer[range].dropFirst(9) // Remove "out_time="
+                        self?.log("Matched time string: \(timeStr)")
                         let parts = timeStr.split(separator: ":")
                         if parts.count == 3,
                            let h = Double(parts[0]),
                            let m = Double(parts[1]),
                            let s = Double(parts[2]) {
-                            let time = h * 3600 + m * 60 + s
-                            DispatchQueue.main.async { onProgress?(time) }
+                            let encodedTime = h * 3600 + m * 60 + s
+                            // Add seek position to get actual source position
+                            let sourceTime = (self?.currentSeekPosition ?? 0) + encodedTime
+                            self?.log("Parsed time: \(encodedTime) + seek: \(self?.currentSeekPosition ?? 0) = \(sourceTime)")
+                            // Call directly - DispatchQueue.main doesn't work in CLI without run loop
+                            onProgress?(sourceTime)
                         }
                     }
 
@@ -245,6 +273,7 @@ public final class TranscodeServer: @unchecked Sendable {
                     }
                 }
             }
+            self?.log("Progress thread exiting, isStreaming=\(self?.isStreaming ?? false)")
         }
 
         // Wait for both reading threads to be ready
@@ -255,9 +284,9 @@ public final class TranscodeServer: @unchecked Sendable {
         do {
             try ffmpeg.run()
             self.ffmpegProcess = ffmpeg
-            print("[TRANSCODER] FFmpeg started at position \(formatTime(position))")
+            log("FFmpeg started at position \(formatTime(position))")
         } catch {
-            print("[TRANSCODER] Failed to start FFmpeg: \(error)")
+            log("Failed to start FFmpeg: \(error)")
         }
     }
 
@@ -285,19 +314,19 @@ public final class TranscodeServer: @unchecked Sendable {
     public func pause() {
         guard let process = ffmpegProcess, process.isRunning else { return }
         kill(process.processIdentifier, SIGSTOP)
-        print("[TRANSCODER] Paused (SIGSTOP)")
+        log("Paused (SIGSTOP)")
     }
 
     public func resume() {
         guard let process = ffmpegProcess, process.isRunning else { return }
         kill(process.processIdentifier, SIGCONT)
-        print("[TRANSCODER] Resumed (SIGCONT)")
+        log("Resumed (SIGCONT)")
     }
 
     /// Seek to a new position by restarting FFmpeg
     /// The HTTP connection stays open - only FFmpeg restarts
     public func seek(to time: TimeInterval) {
-        print("[TRANSCODER] Seeking to \(formatTime(time))...")
+        log("Seeking to \(formatTime(time))...")
 
         // Store new position
         currentSeekPosition = time
@@ -308,7 +337,7 @@ public final class TranscodeServer: @unchecked Sendable {
             kill(process.processIdentifier, SIGCONT)
             process.terminate()
             process.waitUntilExit()
-            print("[TRANSCODER] Old FFmpeg terminated")
+            log("Old FFmpeg terminated")
         }
 
         // Start new FFmpeg at new position (same client socket)

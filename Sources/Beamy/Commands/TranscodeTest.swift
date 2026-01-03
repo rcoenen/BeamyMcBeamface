@@ -1,6 +1,7 @@
 import ArgumentParser
 import BeamyKit
 import Foundation
+import Rainbow
 
 struct TranscodeTest: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -219,13 +220,14 @@ class TranscoderTUI: @unchecked Sendable {
     }
 
     func run() throws {
+        // Clear screen and hide cursor
+        print("\u{001B}[2J\u{001B}[?25l")
+
         // Launch ffplay first
         launchFFplayDetached()
 
         // Wait for ffplay to connect
         sleep(2)
-
-        // NOTE: Hack removed for debugging - we want to see WHY it doesn't work
 
         // Start display update thread
         DispatchQueue.global(qos: .userInitiated).async {
@@ -235,46 +237,113 @@ class TranscoderTUI: @unchecked Sendable {
             }
         }
 
-        // Simple command loop (no raw mode - avoids terminal conflicts)
-        // Just press Enter to pause/resume, or type commands
-        while let line = readLine() {
-            let cmd = line.trimmingCharacters(in: .whitespaces).lowercased()
+        // Enable raw mode for single-key input
+        enableRawMode()
+        defer { cleanup() }
 
-            if cmd.isEmpty {
-                togglePlayPause()
-            } else if cmd == "q" {
-                server.stop()
-                break
-            } else if cmd.hasPrefix("s ") {
-                let timeStr = String(cmd.dropFirst(2))
-                if let seconds = Double(timeStr) {
-                    server.seek(to: seconds)
+        // Draw initial UI
+        sleep(1)
+
+        // Move cursor to input line (line 11)
+        print("\u{001B}[11;1H\u{001B}[K")
+        fflush(stdout)
+
+        var inputBuffer = ""
+        var running = true
+
+        // Raw input loop - process keypresses immediately
+        while running {
+            var char: UInt8 = 0
+            let result = read(STDIN_FILENO, &char, 1)
+
+            guard result > 0 else { continue }
+
+            switch char {
+            case 32: // Spacebar
+                if inputBuffer.isEmpty {
+                    // Only toggle if not typing a command
+                    togglePlayPause()
+                } else {
+                    // Add space to command being typed
+                    inputBuffer.append(" ")
+                    print("\u{001B}[11;1H\u{001B}[K> \(inputBuffer)", terminator: "")
+                    fflush(stdout)
+                }
+            case 113: // 'q'
+                if inputBuffer.isEmpty {
+                    server.stop()
+                    running = false
+                } else {
+                    // Add 'q' to command
+                    inputBuffer.append("q")
+                    print("\u{001B}[11;1H\u{001B}[K> \(inputBuffer)", terminator: "")
+                    fflush(stdout)
+                }
+            case 10, 13: // Enter - submit command
+                let cmd = inputBuffer.trimmingCharacters(in: .whitespaces).lowercased()
+                if cmd.hasPrefix("s ") {
+                    let timeStr = String(cmd.dropFirst(2))
+                    if let seconds = Double(timeStr) {
+                        let wasPlaying = isPlaying
+                        server.seek(to: seconds)
+                        if !wasPlaying {
+                            usleep(100_000)
+                            server.pause()
+                            isPlaying = false
+                        }
+                    }
+                }
+                inputBuffer = ""
+                print("\u{001B}[11;1H\u{001B}[K> ", terminator: "")
+                fflush(stdout)
+            case 127, 8: // Backspace
+                if !inputBuffer.isEmpty {
+                    inputBuffer.removeLast()
+                    print("\u{001B}[11;1H\u{001B}[K> \(inputBuffer)", terminator: "")
+                    fflush(stdout)
+                }
+            default:
+                if char >= 32 && char < 127 { // Printable ASCII
+                    inputBuffer.append(Character(UnicodeScalar(char)))
+                    print("\u{001B}[11;1H\u{001B}[K> \(inputBuffer)", terminator: "")
+                    fflush(stdout)
                 }
             }
         }
     }
 
     private func drawUI() {
-        // Move cursor to top and redraw
-        print("\u{001B}[H\u{001B}[J", terminator: "") // Clear screen
+        // Save cursor position, move to top, draw UI, restore cursor
+        // This prevents clearing the input line where user is typing
+        print("\u{001B}7", terminator: "") // Save cursor position
+        print("\u{001B}[1;1H", terminator: "") // Move to line 1, col 1
 
         let percent = duration > 0 ? (currentPosition / duration) * 100 : 0
         let barWidth = 50
         let filled = Int((currentPosition / max(1, duration)) * Double(barWidth))
-        let bar = String(repeating: "━", count: min(filled, barWidth)) +
-                  "●" +
-                  String(repeating: "─", count: max(0, barWidth - filled - 1))
+        let filledBar = String(repeating: "━", count: min(filled, barWidth)).green.bold
+        let emptyBar = String(repeating: "─", count: max(0, barWidth - filled - 1)).lightBlack
+        let bar = filledBar + "●".green.bold + emptyBar
 
-        print("┌─ Beamy Transcoder ─────────────────────────────────────────┐")
-        print("│                                                             │")
-        print("│  \(isPlaying ? "▶" : "⏸")  \(formatTime(currentPosition)) / \(formatTime(duration))  (\(String(format: "%.1f", percent))%)")
-        print("│                                                             │")
-        print("│  \(bar)  │")
-        print("│                                                             │")
-        print("├─ Commands ──────────────────────────────────────────────────┤")
-        print("│  [Enter] = Pause/Resume    [s 30] = Seek to 30s    [q] = Quit")
-        print("└─────────────────────────────────────────────────────────────┘")
-        print("")
+        // Status icon shows NEXT action (not current state)
+        // Playing → show pause icon (will pause when pressed)
+        // Paused → show play icon (will play when pressed)
+        let statusIcon = isPlaying ? "⏸".yellow : "▶".green
+        let timeDisplay = "\(formatTime(currentPosition).bold) / \(formatTime(duration))"
+        let percentDisplay = "(\(String(format: "%.1f", percent).yellow)%)"
+
+        // Draw UI box (9 lines total)
+        print("┌─ Beamy Transcoder ─────────────────────────────────────────┐".cyan.bold + "\u{001B}[K")
+        print("│                                                             │".cyan + "\u{001B}[K")
+        print("│  \(statusIcon)  \(timeDisplay)  \(percentDisplay)".cyan + "\u{001B}[K")
+        print("│                                                             │".cyan + "\u{001B}[K")
+        print("│  \(bar)  │".cyan + "\u{001B}[K")
+        print("│                                                             │".cyan + "\u{001B}[K")
+        print("├─ Commands ──────────────────────────────────────────────────┤".cyan.bold + "\u{001B}[K")
+        print("│  ".cyan + "[SPACE]".green.bold + " = Pause/Resume    ".cyan + "[s 30]".green.bold + " = Seek to 30s    ".cyan + "[q]".green.bold + " = Quit".cyan + "\u{001B}[K")
+        print("└─────────────────────────────────────────────────────────────┘".cyan.bold + "\u{001B}[K")
+
+        print("\u{001B}8", terminator: "") // Restore cursor position
         fflush(stdout)
     }
 

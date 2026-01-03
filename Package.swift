@@ -14,6 +14,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(url: "https://github.com/LebJe/TOMLKit", from: "0.5.0"),
+        .package(url: "https://github.com/onevcat/Rainbow", from: "4.0.0"),
     ],
     targets: [
         // Shared library
@@ -29,6 +30,7 @@ let package = Package(
             dependencies: [
                 "BeamyKit",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Rainbow", package: "Rainbow"),
             ]
         ),
     ]
