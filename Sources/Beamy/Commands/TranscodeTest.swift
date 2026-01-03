@@ -10,7 +10,7 @@ struct TranscodeTest: ParsableCommand {
     )
 
     @Argument(help: "Input video file path")
-    var inputFile: String = "/Users/rob/Movies/The Shining 1980 REMASTERED 1080p BluRay HEVC x265 5.1 BONE.mkv"
+    var inputFile: String
 
     @Option(name: .shortAndLong, help: "Port for HTTP server")
     var port: Int = 8080
