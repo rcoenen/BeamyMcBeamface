@@ -32,7 +32,7 @@ targets:
         DEVELOPMENT_TEAM: ""
         MACOSX_DEPLOYMENT_TARGET: "13.0"
         SWIFT_VERSION: "6.0"
-        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_HARDENED_RUNTIME: NO
         GENERATE_INFOPLIST_FILE: NO
     entitlements:
       path: Sources/BeamyApp/BeamyMcBeamface.entitlements
@@ -40,6 +40,7 @@ targets:
         com.apple.security.app-sandbox: false
         com.apple.security.network.client: true
         com.apple.security.network.server: true
+        com.apple.security.files.user-selected.read-write: true
 
 schemes:
   BeamyMcBeamface:

@@ -57,7 +57,11 @@ public struct Config: Codable {
     }
 
     public static var configDirectory: URL {
-        URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        // For GUI apps, use Application Support; for CLI, use current directory
+        if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            return appSupport.appendingPathComponent("Beamy")
+        }
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     }
 
     public static var configPath: URL {

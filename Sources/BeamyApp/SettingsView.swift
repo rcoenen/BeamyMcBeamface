@@ -3,22 +3,42 @@ import BeamyKit
 
 struct SettingsView: View {
     @EnvironmentObject var viewModel: CastingViewModel
+    @Environment(\.dismiss) var dismiss
     @State private var ffmpegPath: String = ""
     @State private var ffprobePath: String = ""
-    @State private var defaultDevice: String = ""
     @State private var preset: String = "ultrafast"
     @State private var crf: Int = 23
     @State private var audioBitrate: String = "192k"
 
+    // Default values for comparison
+    private let defaults = Config.default
+
+    private var hasChangesFromDefaults: Bool {
+        ffmpegPath != defaults.ffmpeg.ffmpegPath ||
+        ffprobePath != defaults.ffmpeg.ffprobePath ||
+        preset != defaults.ffmpeg.preset ||
+        crf != defaults.ffmpeg.crf ||
+        audioBitrate != defaults.ffmpeg.audioBitrate
+    }
+
     var body: some View {
-        TabView {
-            // FFmpeg settings
-            Form {
+        Form {
+                // FFmpeg status
+                Section {
+                    HStack {
+                        Image(systemName: FFmpeg.isAvailable() ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(FFmpeg.isAvailable() ? .green : .red)
+                            .font(.title2)
+                        Text(FFmpeg.isAvailable() ? "FFmpeg found" : "FFmpeg not found")
+                            .font(.headline)
+                    }
+                }
+
                 Section("FFmpeg Paths") {
                     HStack {
                         TextField("ffmpeg path", text: $ffmpegPath)
                         Button("Browse...") {
-                            browseForFile { url in
+                            browseForFile(currentPath: ffmpegPath) { url in
                                 ffmpegPath = url.path
                             }
                         }
@@ -26,7 +46,7 @@ struct SettingsView: View {
                     HStack {
                         TextField("ffprobe path", text: $ffprobePath)
                         Button("Browse...") {
-                            browseForFile { url in
+                            browseForFile(currentPath: ffprobePath) { url in
                                 ffprobePath = url.path
                             }
                         }
@@ -52,51 +72,40 @@ struct SettingsView: View {
                         Text("320k").tag("320k")
                     }
                 }
-            }
-            .tabItem {
-                Label("FFmpeg", systemImage: "film")
-            }
 
-            // Chromecast settings
-            Form {
-                Section("Default Device") {
-                    Picker("Device", selection: $defaultDevice) {
-                        Text("None").tag("")
-                        ForEach(viewModel.devices, id: \.id) { device in
-                            Text(device.name).tag(device.name)
-                        }
+                Section {
+                    Button("Restore Defaults") {
+                        restoreDefaults()
                     }
-
-                    Button("Refresh Device List") {
-                        viewModel.discoverDevices()
-                    }
+                    .disabled(!hasChangesFromDefaults)
                 }
             }
-            .tabItem {
-                Label("Chromecast", systemImage: "tv")
+        .padding()
+        .frame(width: 450, height: 350)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") {
+                    dismiss()
+                }
             }
         }
-        .padding()
-        .frame(width: 450, height: 300)
         .onAppear {
             loadConfig()
         }
         .onChange(of: ffmpegPath) { _ in saveConfig() }
         .onChange(of: ffprobePath) { _ in saveConfig() }
-        .onChange(of: defaultDevice) { _ in saveConfig() }
         .onChange(of: preset) { _ in saveConfig() }
         .onChange(of: crf) { _ in saveConfig() }
         .onChange(of: audioBitrate) { _ in saveConfig() }
     }
 
     private func loadConfig() {
-        guard let config = try? Config.load() else { return }
+        let config = (try? Config.load()) ?? Config.default
         ffmpegPath = config.ffmpeg.ffmpegPath
         ffprobePath = config.ffmpeg.ffprobePath
         preset = config.ffmpeg.preset
         crf = config.ffmpeg.crf
         audioBitrate = config.ffmpeg.audioBitrate
-        defaultDevice = config.chromecast.defaultDevice ?? ""
     }
 
     private func saveConfig() {
@@ -106,15 +115,30 @@ struct SettingsView: View {
         config.ffmpeg.preset = preset
         config.ffmpeg.crf = crf
         config.ffmpeg.audioBitrate = audioBitrate
-        config.chromecast.defaultDevice = defaultDevice.isEmpty ? nil : defaultDevice
         try? config.save()
     }
 
-    private func browseForFile(completion: @escaping (URL) -> Void) {
+    private func restoreDefaults() {
+        ffmpegPath = defaults.ffmpeg.ffmpegPath
+        ffprobePath = defaults.ffmpeg.ffprobePath
+        preset = defaults.ffmpeg.preset
+        crf = defaults.ffmpeg.crf
+        audioBitrate = defaults.ffmpeg.audioBitrate
+    }
+
+    private func browseForFile(currentPath: String, completion: @escaping (URL) -> Void) {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
+
+        // Open in directory of current path if it exists
+        if !currentPath.isEmpty {
+            let currentURL = URL(fileURLWithPath: currentPath)
+            let directory = currentURL.deletingLastPathComponent()
+            panel.directoryURL = directory
+        }
+
         if panel.runModal() == .OK, let url = panel.url {
             completion(url)
         }

@@ -4,19 +4,31 @@ import BeamyKit
 @MainActor
 class CastingViewModel: ObservableObject {
     @Published var devices: [ChromecastDevice] = []
-    @Published var selectedDevice: ChromecastDevice?
+    @Published var selectedDevice: ChromecastDevice? {
+        didSet {
+            saveSelectedDevice()
+        }
+    }
     @Published var currentFile: URL?
     @Published var isCasting = false
     @Published var isDiscovering = false
     @Published var errorMessage: String?
 
     private var caster: Caster?
+    private var isLoadingConfig = false  // Prevent save during initial load
 
     init() {
-        // Load default device from config
-        loadDefaultDevice()
-        // Start device discovery
+        isLoadingConfig = true
+        // Start device discovery (will load default after discovery)
         discoverDevices()
+        isLoadingConfig = false
+    }
+
+    private func saveSelectedDevice() {
+        guard !isLoadingConfig else { return }
+        guard var config = try? Config.load() else { return }
+        config.chromecast.defaultDevice = selectedDevice?.name
+        try? config.save()
     }
 
     func discoverDevices() {
@@ -34,9 +46,11 @@ class CastingViewModel: ObservableObject {
                     self.devices = videoDevices
                     self.isDiscovering = false
 
-                    // Select default device if configured
+                    // Select default device if configured (without triggering save)
                     if let defaultName = try? Config.load().chromecast.defaultDevice {
+                        self.isLoadingConfig = true
                         self.selectedDevice = videoDevices.first { $0.name == defaultName }
+                        self.isLoadingConfig = false
                     }
                 }
             } catch {
@@ -50,7 +64,7 @@ class CastingViewModel: ObservableObject {
 
     func handleFileDrop(url: URL) {
         // Check if it's a video file
-        let videoExtensions = ["mp4", "mkv", "avi", "mov", "m4v", "webm", "flv", "wmv"]
+        let videoExtensions = ["mp4", "mkv", "webm", "mov"]
         guard videoExtensions.contains(url.pathExtension.lowercased()) else {
             errorMessage = "Unsupported file type. Please drop a video file."
             return
@@ -109,11 +123,4 @@ class CastingViewModel: ObservableObject {
         isCasting = false
     }
 
-    private func loadDefaultDevice() {
-        if let config = try? Config.load(),
-           let defaultName = config.chromecast.defaultDevice {
-            // Device will be selected after discovery completes
-            _ = defaultName
-        }
-    }
 }
