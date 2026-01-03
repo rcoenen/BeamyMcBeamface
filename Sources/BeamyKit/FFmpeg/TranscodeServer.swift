@@ -1,6 +1,11 @@
 import Foundation
 
-/// A simple HTTP server that serves transcoded media content
+/// A simple HTTP server that serves transcoded media content.
+///
+/// Architecture:
+/// - HTTP server accepts client connections and keeps them open
+/// - FFmpeg process is managed separately and can be restarted (for seek)
+/// - On seek: kill FFmpeg, restart at new position, continue streaming to same socket
 public final class TranscodeServer: @unchecked Sendable {
     private let input: URL
     private let port: Int
@@ -8,9 +13,22 @@ public final class TranscodeServer: @unchecked Sendable {
     private var serverSocket: Int32 = -1
     private var isRunning = false
     private var ffmpegProcess: Process?
+    private var currentSeekPosition: TimeInterval = 0
+
+    // Client socket stored at class level so seek can reuse it
+    private var clientSocket: Int32 = -1
+    private var streamingQueue: DispatchQueue?
+    private var isStreaming = false
+
+    // Keep pipes alive at class level to prevent deallocation
+    private var outputPipe: Pipe?
+    private var stderrPipe: Pipe?
+
+    /// Callback for progress updates (current time in seconds, source position)
+    public var onProgress: (@Sendable (TimeInterval) -> Void)?
 
     public var url: URL {
-        URL(string: "http://\(getLocalIPAddress()):\(port)/stream.mp4")!
+        URL(string: "http://\(getLocalIPAddress()):\(port)/stream.ts")!
     }
 
     public init(input: URL, port: Int, mediaInfo: MediaInfo) throws {
@@ -63,89 +81,238 @@ public final class TranscodeServer: @unchecked Sendable {
             var clientAddr = sockaddr_in()
             var clientAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
 
-            let clientSocket = withUnsafeMutablePointer(to: &clientAddr) {
+            let newClientSocket = withUnsafeMutablePointer(to: &clientAddr) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                     accept(serverSocket, $0, &clientAddrLen)
                 }
             }
 
-            guard clientSocket >= 0 else { continue }
+            guard newClientSocket >= 0 else { continue }
 
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.handleConnection(clientSocket)
-            }
+            // Store client socket and start streaming
+            handleNewConnection(newClientSocket)
         }
     }
 
-    private func handleConnection(_ clientSocket: Int32) {
-        defer { close(clientSocket) }
-
-        // Read HTTP request (we don't really parse it, just consume it)
+    private func handleNewConnection(_ socket: Int32) {
+        // Read HTTP request (just consume it)
         var buffer = [UInt8](repeating: 0, count: 4096)
-        _ = recv(clientSocket, &buffer, buffer.count, 0)
+        _ = recv(socket, &buffer, buffer.count, 0)
 
-        // Send HTTP headers
+        // Send HTTP response headers
         let headers = """
-        HTTP/1.1 200 OK\r
-        Content-Type: video/mp4\r
+        HTTP/1.0 200 OK\r
+        Content-Type: video/mp2t\r
         Access-Control-Allow-Origin: *\r
         Cache-Control: no-cache\r
-        Connection: close\r
         \r
 
         """
-        _ = headers.withCString { send(clientSocket, $0, strlen($0), 0) }
+        _ = headers.withCString { send(socket, $0, strlen($0), 0) }
 
-        // Start FFmpeg - use H.264 baseline profile for maximum Chromecast compatibility
+        // Store socket and start FFmpeg
+        self.clientSocket = socket
+        self.isStreaming = true
+
+        // Create dedicated queue for this streaming session
+        self.streamingQueue = DispatchQueue(label: "com.beamy.streaming", qos: .userInitiated)
+
+        // Start FFmpeg at current seek position
+        startFFmpeg(at: currentSeekPosition)
+    }
+
+    /// Start FFmpeg at the given position and stream to current client socket
+    private func startFFmpeg(at position: TimeInterval) {
+        guard clientSocket >= 0 else {
+            print("[TRANSCODER] No client socket, cannot start FFmpeg")
+            return
+        }
+
         let config = (try? Config.load().ffmpeg) ?? .default
         let ffmpeg = Process()
         ffmpeg.executableURL = URL(fileURLWithPath: config.ffmpegPath)
-        ffmpeg.arguments = [
-            "-i", input.path,
+
+        // Build arguments with seek position and progress reporting
+        var args: [String] = []
+
+        // Seek position (before input for fast seek)
+        if position > 0 {
+            args += ["-ss", String(format: "%.3f", position)]
+        }
+
+        // Preserve original timestamps so progress reflects source position
+        args += ["-copyts"]
+
+        // Input file
+        args += ["-i", input.path]
+
+        // Progress output to stderr (parsed for position feedback)
+        args += ["-progress", "pipe:2"]
+
+        // Video settings
+        args += [
+            "-map", "0:v:0",
+            "-map", "0:a:0?",  // Optional audio
+            "-sn",
             "-c:v", "libx264",
             "-profile:v", "baseline",
             "-level", "3.1",
             "-preset", config.preset,
             "-crf", "\(config.crf)",
+        ]
+
+        // Audio settings
+        args += [
             "-c:a", "aac",
             "-ac", "2",
             "-ar", "44100",
             "-b:a", config.audioBitrate,
-            "-movflags", "frag_keyframe+empty_moov+faststart",
-            "-f", "mp4",
+        ]
+
+        // Output format - flush immediately to prevent buffering issues
+        args += [
+            "-flush_packets", "1",
+            "-fflags", "+flush_packets",
+            "-f", "mpegts",
             "pipe:1"
         ]
 
-        let outputPipe = Pipe()
-        ffmpeg.standardOutput = outputPipe
-        ffmpeg.standardError = FileHandle.nullDevice
+        ffmpeg.arguments = args
+        print("[TRANSCODER] FFmpeg args: \(args.joined(separator: " "))")
 
+        // Store pipes at class level to prevent deallocation
+        let newOutputPipe = Pipe()
+        let newStderrPipe = Pipe()
+        self.outputPipe = newOutputPipe
+        self.stderrPipe = newStderrPipe
+        ffmpeg.standardOutput = newOutputPipe
+        ffmpeg.standardError = newStderrPipe
+
+        // CRITICAL: Detach FFmpeg from terminal stdin to prevent blocking.
+        // Without this, FFmpeg inherits the parent's terminal stdin. When running
+        // interactively, FFmpeg waits for terminal access before writing to stdout,
+        // causing the stream to hang until a SIGSTOP/SIGCONT cycle "kicks" it.
+        // Setting stdin to /dev/null breaks the terminal association completely.
+        ffmpeg.standardInput = FileHandle.nullDevice
+
+        // Set up handles before starting anything
+        let clientSocket = self.clientSocket
+        let outputHandle = newOutputPipe.fileHandleForReading
+        let stderrHandle = newStderrPipe.fileHandleForReading
+        let onProgress = self.onProgress
+
+        // Start the reading threads BEFORE FFmpeg to prevent pipe buffer deadlock
+        let streamingStarted = DispatchSemaphore(value: 0)
+        let stderrStarted = DispatchSemaphore(value: 0)
+
+        // Stream video data to client socket - MUST start before FFmpeg
+        Thread.detachNewThread { [weak self] in
+            streamingStarted.signal()  // Signal that we're ready to read
+            while self?.isStreaming == true {
+                let data = outputHandle.availableData
+                if data.isEmpty { break }
+                let sent = data.withUnsafeBytes { send(clientSocket, $0.baseAddress, data.count, 0) }
+                if sent < 0 { break }
+            }
+        }
+
+        // Parse stderr for progress
+        Thread.detachNewThread {
+            stderrStarted.signal()  // Signal that we're ready to read
+            var textBuffer = ""
+            while true {
+                let data = stderrHandle.availableData
+                if data.isEmpty { break }
+                if let text = String(data: data, encoding: .utf8) {
+                    textBuffer += text
+
+                    // Parse out_time=HH:MM:SS.ffffff from -progress output
+                    if let range = textBuffer.range(of: "out_time=(\\d{2}):(\\d{2}):(\\d{2}\\.\\d+)", options: .regularExpression) {
+                        let timeStr = textBuffer[range].dropFirst(9) // Remove "out_time="
+                        let parts = timeStr.split(separator: ":")
+                        if parts.count == 3,
+                           let h = Double(parts[0]),
+                           let m = Double(parts[1]),
+                           let s = Double(parts[2]) {
+                            let time = h * 3600 + m * 60 + s
+                            DispatchQueue.main.async { onProgress?(time) }
+                        }
+                    }
+
+                    // Clear buffer after progress=continue/end line
+                    if textBuffer.contains("progress=") {
+                        textBuffer = ""
+                    }
+                }
+            }
+        }
+
+        // Wait for both reading threads to be ready
+        streamingStarted.wait()
+        stderrStarted.wait()
+
+        // NOW start FFmpeg - readers are already waiting for data
         do {
             try ffmpeg.run()
             self.ffmpegProcess = ffmpeg
-
-            let fileHandle = outputPipe.fileHandleForReading
-
-            while ffmpeg.isRunning || fileHandle.availableData.count > 0 {
-                let data = fileHandle.availableData
-                if data.isEmpty { break }
-
-                // Send raw bytes directly (no chunked encoding)
-                _ = data.withUnsafeBytes { send(clientSocket, $0.baseAddress, data.count, 0) }
-            }
-
+            print("[TRANSCODER] FFmpeg started at position \(formatTime(position))")
         } catch {
-            // Connection closed or error
+            print("[TRANSCODER] Failed to start FFmpeg: \(error)")
         }
+    }
+
+    private func formatTime(_ seconds: TimeInterval) -> String {
+        let h = Int(seconds) / 3600
+        let m = (Int(seconds) % 3600) / 60
+        let s = Int(seconds) % 60
+        return String(format: "%02d:%02d:%02d", h, m, s)
     }
 
     public func stop() {
         isRunning = false
+        isStreaming = false
         ffmpegProcess?.terminate()
+        if clientSocket >= 0 {
+            close(clientSocket)
+            clientSocket = -1
+        }
         if serverSocket >= 0 {
             close(serverSocket)
             serverSocket = -1
         }
+    }
+
+    public func pause() {
+        guard let process = ffmpegProcess, process.isRunning else { return }
+        kill(process.processIdentifier, SIGSTOP)
+        print("[TRANSCODER] Paused (SIGSTOP)")
+    }
+
+    public func resume() {
+        guard let process = ffmpegProcess, process.isRunning else { return }
+        kill(process.processIdentifier, SIGCONT)
+        print("[TRANSCODER] Resumed (SIGCONT)")
+    }
+
+    /// Seek to a new position by restarting FFmpeg
+    /// The HTTP connection stays open - only FFmpeg restarts
+    public func seek(to time: TimeInterval) {
+        print("[TRANSCODER] Seeking to \(formatTime(time))...")
+
+        // Store new position
+        currentSeekPosition = time
+
+        // Stop current FFmpeg
+        if let process = ffmpegProcess, process.isRunning {
+            // First resume if stopped (SIGTERM won't work on stopped process)
+            kill(process.processIdentifier, SIGCONT)
+            process.terminate()
+            process.waitUntilExit()
+            print("[TRANSCODER] Old FFmpeg terminated")
+        }
+
+        // Start new FFmpeg at new position (same client socket)
+        startFFmpeg(at: time)
     }
 
     private func getLocalIPAddress() -> String {

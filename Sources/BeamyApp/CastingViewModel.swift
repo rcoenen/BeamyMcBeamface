@@ -1,5 +1,8 @@
 import SwiftUI
 import BeamyKit
+import AVKit
+import WebKit
+import Combine
 
 @MainActor
 class CastingViewModel: ObservableObject {
@@ -10,16 +13,29 @@ class CastingViewModel: ObservableObject {
         }
     }
     @Published var currentFile: URL?
+    @Published var mediaInfo: MediaInfo?
+    @Published var isPlaying = false
+    @Published var currentTime: TimeInterval = 0
+    @Published var duration: TimeInterval = 0
     @Published var isCasting = false
     @Published var isDiscovering = false
     @Published var errorMessage: String?
 
     private var caster: Caster?
-    private var isLoadingConfig = false  // Prevent save during initial load
+    var transcodeServer: TranscodeServer?
+    private var isLoadingConfig = false
+
+    // Computed properties for UI
+    var progress: Double {
+        duration > 0 ? currentTime / duration : 0
+    }
+
+    var timeRemaining: TimeInterval {
+        max(0, duration - currentTime)
+    }
 
     init() {
         isLoadingConfig = true
-        // Start device discovery (will load default after discovery)
         discoverDevices()
         isLoadingConfig = false
     }
@@ -46,7 +62,6 @@ class CastingViewModel: ObservableObject {
                     self.devices = videoDevices
                     self.isDiscovering = false
 
-                    // Select default device if configured (without triggering save)
                     if let defaultName = try? Config.load().chromecast.defaultDevice {
                         self.isLoadingConfig = true
                         self.selectedDevice = videoDevices.first { $0.name == defaultName }
@@ -63,64 +78,143 @@ class CastingViewModel: ObservableObject {
     }
 
     func handleFileDrop(url: URL) {
-        // Check if it's a video file
-        let videoExtensions = ["mp4", "mkv", "webm", "mov"]
+        print("[DROP] File dropped: \(url.path)")
+
+        let videoExtensions = ["mp4", "mkv", "webm", "mov", "avi", "m4v"]
         guard videoExtensions.contains(url.pathExtension.lowercased()) else {
+            print("[DROP] Rejected - unsupported extension: \(url.pathExtension)")
             errorMessage = "Unsupported file type. Please drop a video file."
             return
         }
 
+        print("[DROP] Extension OK, stopping preview...")
+        stopPreview()
         currentFile = url
+        errorMessage = nil
 
-        // Auto-cast if device is selected
-        if selectedDevice != nil {
-            startCasting()
-        }
-    }
-
-    func startCasting() {
-        guard let file = currentFile, let device = selectedDevice else {
-            errorMessage = "Please select a device and drop a video file."
+        // Get media info for duration
+        print("[DROP] Getting media info...")
+        do {
+            let info = try FFmpeg.getMediaInfo(file: url)
+            self.mediaInfo = info
+            self.duration = info.duration
+            print("[DROP] Media info OK - duration: \(info.duration)")
+        } catch {
+            print("[DROP] Media info FAILED: \(error)")
+            errorMessage = "Failed to read media info: \(error.localizedDescription)"
             return
         }
 
-        guard !isCasting else { return }
+        print("[DROP] Starting transcoder...")
+        startTranscoder()
+    }
 
-        isCasting = true
-        errorMessage = nil
+    private func startTranscoder() {
+        guard let url = currentFile, let info = mediaInfo else {
+            print("[TRANSCODER] No file or media info!")
+            return
+        }
 
-        Task {
-            do {
-                // Get media info
-                let mediaInfo = try FFmpeg.getMediaInfo(file: file)
+        let port = findAvailablePort()
+        print("[TRANSCODER] Using port \(port)")
 
-                // Create caster and start casting
-                let caster = Caster(device: device, verbose: false)
-                self.caster = caster
+        do {
+            let server = try TranscodeServer(input: url, port: port, mediaInfo: info)
+            self.transcodeServer = server
+            print("[TRANSCODER] Server started at \(server.url)")
 
-                // Note: cast() is blocking, so we run it in a detached task
-                Task.detached {
-                    do {
-                        try caster.cast(file: file, mediaInfo: mediaInfo)
-                    } catch {
-                        await MainActor.run {
-                            self.errorMessage = "Casting failed: \(error.localizedDescription)"
-                            self.isCasting = false
-                        }
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.errorMessage = "Failed to analyze file: \(error.localizedDescription)"
-                    self.isCasting = false
+            // Track transcoder progress
+            server.onProgress = { [weak self] time in
+                DispatchQueue.main.async {
+                    self?.currentTime = time
                 }
             }
+
+            isPlaying = true
+            print("[TRANSCODER] Ready! Playing at \(server.url)")
+        } catch {
+            print("[TRANSCODER] FAILED: \(error)")
+            errorMessage = "Failed to start transcoder: \(error.localizedDescription)"
         }
     }
 
-    func stopCasting() {
-        caster = nil
-        isCasting = false
+    private func findAvailablePort() -> Int {
+        // Try to find an available port starting from 8080
+        for port in 8080..<9000 {
+            if isPortAvailable(port) {
+                return port
+            }
+        }
+        return 8080
     }
 
+    private func isPortAvailable(_ port: Int) -> Bool {
+        let socketFD = socket(AF_INET, SOCK_STREAM, 0)
+        guard socketFD >= 0 else { return false }
+        defer { close(socketFD) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = INADDR_ANY
+
+        let result = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(socketFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+
+        return result >= 0
+    }
+
+    func togglePlayPause() {
+        if isPlaying {
+            pause()
+        } else {
+            play()
+        }
+    }
+
+    func play() {
+        transcodeServer?.resume()
+        isPlaying = true
+    }
+
+    func pause() {
+        transcodeServer?.pause()
+        isPlaying = false
+    }
+
+    func skipForward() {
+        seek(to: currentTime + 10)
+    }
+
+    func skipBackward() {
+        seek(to: max(0, currentTime - 10))
+    }
+
+    func seek(to time: TimeInterval) {
+        transcodeServer?.seek(to: time)
+        currentTime = time
+    }
+
+    func seekToProgress(_ progress: Double) {
+        let time = progress * duration
+        seek(to: time)
+    }
+
+    func stopPreview() {
+        transcodeServer?.stop()
+        transcodeServer = nil
+        isPlaying = false
+        currentTime = 0
+    }
+
+    static func formatTime(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite && !seconds.isNaN else { return "00:00:00" }
+        let hours = Int(seconds) / 3600
+        let minutes = (Int(seconds) % 3600) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%02d:%02d:%02d", hours, minutes, secs)
+    }
 }

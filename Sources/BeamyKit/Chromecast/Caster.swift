@@ -1,9 +1,12 @@
 import Foundation
 
-public class Caster {
+public class Caster: @unchecked Sendable {
     private let device: ChromecastDevice
     private let verbose: Bool
     private var transcodeServer: TranscodeServer?
+
+    /// Callback for progress updates (current time in seconds)
+    public var onProgress: ((TimeInterval) -> Void)?
 
     public init(device: ChromecastDevice, verbose: Bool = false) {
         self.device = device
@@ -26,6 +29,11 @@ public class Caster {
             port: port,
             mediaInfo: mediaInfo
         )
+
+        // Forward progress updates
+        transcodeServer?.onProgress = { [weak self] time in
+            self?.onProgress?(time)
+        }
 
         let streamURL = transcodeServer!.url
 

@@ -7,6 +7,6 @@ struct Beamy: ParsableCommand {
         commandName: "beamy",
         abstract: "BeamyMcBeamface - Cast media files to Chromecast devices",
         version: "0.1.0",
-        subcommands: [Cast.self, CastTest.self, Devices.self, ConfigCmd.self, ChromecastDiscover.self, FFmpegDiscover.self]
+        subcommands: [Cast.self, CastTest.self, Devices.self, ConfigCmd.self, ChromecastDiscover.self, FFmpegDiscover.self, TranscodeTest.self]
     )
 }
