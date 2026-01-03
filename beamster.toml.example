@@ -1,0 +1,26 @@
+# Beamster Configuration File
+# Copy this file to beamster.toml and customize as needed
+# Run `beamster config init` to auto-generate with detected paths
+
+[ffmpeg]
+# Path to ffmpeg binary (auto-detected if in PATH)
+ffmpegPath = '/opt/homebrew/bin/ffmpeg'
+# Path to ffprobe binary (auto-detected if in PATH)
+ffprobePath = '/opt/homebrew/bin/ffprobe'
+# Encoding preset: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+preset = 'ultrafast'
+# Quality level (0-51, lower = better quality, 23 is default)
+crf = 23
+# Audio bitrate
+audioBitrate = '192k'
+
+[server]
+# Port range for local HTTP streaming server
+portRangeStart = 8080
+portRangeEnd = 9000
+
+[chromecast]
+# Discovery timeout in seconds
+discoveryTimeout = 5.0
+# Optional: Set a default device name
+# defaultDevice = 'Living Room TV'
