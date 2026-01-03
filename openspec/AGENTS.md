@@ -454,3 +454,22 @@ openspec archive <change-id> [--yes|-y]  # Mark complete (add --yes for automati
 ```
 
 Remember: Specs are truth. Changes are proposals. Keep them in sync.
+
+## Project-Specific: Building Beamy
+
+### CLI (Swift Package Manager)
+```bash
+swift build                    # Build CLI and BeamyKit library
+swift run beamy <command>      # Run CLI commands
+```
+
+### GUI App (Xcode)
+```bash
+# Build
+xcodebuild -project BeamyMcBeamface.xcodeproj -scheme BeamyMcBeamface -configuration Debug build
+
+# Run
+open ~/Library/Developer/Xcode/DerivedData/BeamyMcBeamface-*/Build/Products/Debug/Beamy\ McBeamface.app
+```
+
+Note: The GUI app uses BeamyKit as a local package dependency.

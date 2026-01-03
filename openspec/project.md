@@ -1,7 +1,7 @@
 # Project Context
 
 ## Purpose
-Beamster is a macOS command-line tool for casting media files to Chromecast devices with on-the-fly transcoding. It allows users to stream local video files (particularly MKV files) to their Chromecast by automatically transcoding them to compatible formats using FFmpeg.
+Beamy (BeamyMcBeamface) is a macOS command-line tool for casting media files to Chromecast devices with on-the-fly transcoding. It allows users to stream local video files (particularly MKV files) to their Chromecast by automatically transcoding them to compatible formats using FFmpeg.
 
 Key features:
 - Discover Chromecast devices on the local network
@@ -41,7 +41,7 @@ Key features:
 - **Command Pattern**: Each CLI command is a separate `ParsableCommand` struct
 - **Dependency Injection**: External dependencies (FFmpeg paths, config) loaded at runtime
 - **Error Handling**: Use `ValidationError` for user-facing errors in commands
-- **Configuration**: TOML-based config file (`beamster.toml`) for user settings
+- **Configuration**: TOML-based config file (`beamy.toml`) for user settings
 
 ### Testing Strategy
 Currently, the project does not have a formal test suite. When adding tests:
@@ -55,7 +55,7 @@ Currently, the project does not have a formal test suite. When adding tests:
   - Do NOT automatically commit after completing tasks
   - Do NOT suggest commits without explicit user request
   - Only run `git add` and `git commit` when the user specifically asks for it
-- Configuration file (`beamster.toml`) is gitignored (users copy from `beamster.toml.example`)
+- Configuration file (`beamy.toml`) is gitignored (users copy from `beamy.toml.example`)
 - Standard Swift build artifacts ignored (`.build/`, `.swiftpm/`, etc.)
 
 ## Domain Context
@@ -76,7 +76,7 @@ Currently, the project does not have a formal test suite. When adding tests:
 - **Platform**: macOS only (requires macOS 13+)
 - **Runtime Dependencies**: Requires FFmpeg and FFprobe installed on system
   - Typically installed via Homebrew: `brew install ffmpeg`
-  - Paths configurable in `beamster.toml`
+  - Paths configurable in `beamy.toml`
 - **Network**: Requires local network access for Chromecast discovery and streaming
 - **Port Availability**: Needs available ports in configured range (default 8080-9000) for HTTP server
 
