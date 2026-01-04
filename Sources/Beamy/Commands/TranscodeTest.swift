@@ -353,12 +353,10 @@ class TranscoderTUI: @unchecked Sendable {
 
     private func scrub(offset: TimeInterval) {
         log("=== SCRUB START \(offset > 0 ? "→" : "←") offset=\(offset)s ===")
-        log("SCRUB: lastSeekPosition=\(lastSeekPosition), lastSeekTime=\(lastSeekTime?.timeIntervalSinceNow ?? 999)")
 
-        // For scrubbing, we use lastSeekPosition as the source of truth
-        // because mpv returns stale positions immediately after reloadStream()
-        let currentTime = lastSeekPosition
-        log("SCRUB: Using lastSeekPosition as source of truth: \(currentTime)s")
+        // Use server.currentPosition as source of truth since it tracks FFmpeg PTS accurately
+        let currentTime = getCurrentPosition()
+        log("SCRUB: Using server.currentPosition: \(currentTime)s")
 
         // Calculate new position and seek
         let newPosition = max(0, currentTime + offset)
@@ -408,28 +406,21 @@ class TranscoderTUI: @unchecked Sendable {
     }
 
     private func getCurrentPosition() -> TimeInterval {
-        // If we just seeked (within last 2 seconds), use the seek target
-        // mpv position is unreliable immediately after seek+reload
+        // After a seek, mpv takes time to reload - playback-time is stale
+        // Use the seek target directly during the grace period
         if let seekTime = lastSeekTime, Date().timeIntervalSince(seekTime) < 2 {
             return lastSeekPosition
         }
 
         if useMpv, let mpv = mpvController {
             do {
-                let pos = try mpv.getPosition()
-
-                // If mpv returns suspiciously small position, might be stale
-                if pos < 1.0 && lastSeekPosition > 5.0 {
-                    // Likely stale - use last known good position
-                    return lastSeekPosition
-                }
-
-                // Update lastSeekPosition if reasonable
-                if pos > 0.5 {
-                    lastSeekPosition = pos
-                }
-                return pos
+                // mpv's playback-time resets after each stream reload (seek).
+                // But we can use it as a relative offset: actual = seekTarget + playback-time
+                let playbackTime = try mpv.getPosition()
+                let actual = lastSeekPosition + playbackTime
+                return actual
             } catch {
+                // Fallback to server position if mpv query fails
                 return server.currentPosition
             }
         }
