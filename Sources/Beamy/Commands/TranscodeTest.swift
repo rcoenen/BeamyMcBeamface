@@ -216,6 +216,8 @@ class TranscoderTUI: @unchecked Sendable {
     private var oldTermios: termios?
     private var mpvController: MpvController?
     private var isRunning = true
+    private var lastSeekPosition: TimeInterval = 0
+    private var lastSeekTime: Date?
 
     init(server: TranscodeServer, duration: TimeInterval, useMpv: Bool = false) {
         self.server = server
@@ -279,6 +281,22 @@ class TranscoderTUI: @unchecked Sendable {
             guard result > 0 else { continue }
 
             switch char {
+            case 27: // ESC - check for arrow keys
+                if inputBuffer.isEmpty {
+                    var seq1: UInt8 = 0, seq2: UInt8 = 0
+                    if read(STDIN_FILENO, &seq1, 1) > 0 && seq1 == 91 { // '['
+                        if read(STDIN_FILENO, &seq2, 1) > 0 {
+                            switch seq2 {
+                            case 68: // Left arrow
+                                scrubBackward()
+                            case 67: // Right arrow
+                                scrubForward()
+                            default:
+                                break
+                            }
+                        }
+                    }
+                }
             case 32: // Spacebar
                 if inputBuffer.isEmpty {
                     togglePlayPause()
@@ -325,6 +343,30 @@ class TranscoderTUI: @unchecked Sendable {
 
     // MARK: - Playback Control
 
+    private func scrubBackward() {
+        scrub(offset: -10)
+    }
+
+    private func scrubForward() {
+        scrub(offset: 10)
+    }
+
+    private func scrub(offset: TimeInterval) {
+        log("=== SCRUB START \(offset > 0 ? "→" : "←") offset=\(offset)s ===")
+        log("SCRUB: lastSeekPosition=\(lastSeekPosition), lastSeekTime=\(lastSeekTime?.timeIntervalSinceNow ?? 999)")
+
+        // For scrubbing, we use lastSeekPosition as the source of truth
+        // because mpv returns stale positions immediately after reloadStream()
+        let currentTime = lastSeekPosition
+        log("SCRUB: Using lastSeekPosition as source of truth: \(currentTime)s")
+
+        // Calculate new position and seek
+        let newPosition = max(0, currentTime + offset)
+        log("SCRUB: Calculation: \(currentTime)s + \(offset)s = \(newPosition)s")
+        seek(to: newPosition)
+        log("=== SCRUB END ===")
+    }
+
     private func togglePlayPause() {
         if useMpv, let mpv = mpvController {
             do {
@@ -349,20 +391,44 @@ class TranscoderTUI: @unchecked Sendable {
 
     private func seek(to time: TimeInterval) {
         log("=== SEEK to \(time)s ===")
+        lastSeekPosition = time
+        lastSeekTime = Date()
         if useMpv, let mpv = mpvController {
             // Server prepares for reconnect, kills FFmpeg
             server.seek(to: time, awaitClientReconnect: true)
             // Tell mpv to reload - clears buffer, reconnects
             try? mpv.reloadStream(server.url)
+            // Pause after seek so user sees the frame
+            server.pause()
+            try? mpv.pause()
         } else {
             server.seek(to: time)
+            server.pause()
         }
     }
 
     private func getCurrentPosition() -> TimeInterval {
+        // If we just seeked (within last 2 seconds), use the seek target
+        // mpv position is unreliable immediately after seek+reload
+        if let seekTime = lastSeekTime, Date().timeIntervalSince(seekTime) < 2 {
+            return lastSeekPosition
+        }
+
         if useMpv, let mpv = mpvController {
             do {
-                return try mpv.getPosition()
+                let pos = try mpv.getPosition()
+
+                // If mpv returns suspiciously small position, might be stale
+                if pos < 1.0 && lastSeekPosition > 5.0 {
+                    // Likely stale - use last known good position
+                    return lastSeekPosition
+                }
+
+                // Update lastSeekPosition if reasonable
+                if pos > 0.5 {
+                    lastSeekPosition = pos
+                }
+                return pos
             } catch {
                 return server.currentPosition
             }
@@ -410,7 +476,8 @@ class TranscoderTUI: @unchecked Sendable {
         print("│  \(bar)  │".cyan + "\u{001B}[K")
         print("│                                                             │".cyan + "\u{001B}[K")
         print("├─ Commands ──────────────────────────────────────────────────┤".cyan.bold + "\u{001B}[K")
-        print("│  ".cyan + "[SPACE]".green.bold + " = Pause/Resume    ".cyan + "[s 30]".green.bold + " = Seek to 30s    ".cyan + "[q]".green.bold + " = Quit".cyan + "\u{001B}[K")
+        print("│  ".cyan + "[SPACE]".green.bold + " = Pause/Resume  ".cyan + "[←/→]".green.bold + " = -10s/+10s  ".cyan + "[s 30]".green.bold + " = Seek".cyan + "\u{001B}[K")
+        print("│  ".cyan + "[q]".green.bold + " = Quit".cyan + "                                                  │".cyan + "\u{001B}[K")
         print("└─────────────────────────────────────────────────────────────┘".cyan.bold + "\u{001B}[K")
 
         print("\u{001B}8", terminator: "") // Restore cursor
