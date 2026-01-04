@@ -2,24 +2,6 @@ import XCTest
 @testable import BeamyKit
 
 final class PlayerTests: XCTestCase {
-    func testServerPlayerDelegates() throws {
-        let server = FakeServer()
-        let player = ServerPlayer(server: server, duration: 120)
-
-        XCTAssertEqual(try player.getPosition(), 0)
-        XCTAssertFalse(try player.isPaused())
-
-        try player.pause()
-        XCTAssertTrue(server.isPaused)
-
-        try player.seek(to: 42)
-        XCTAssertEqual(server.seekedTo, 42)
-
-        try player.resume()
-        XCTAssertFalse(server.isPaused)
-        XCTAssertEqual(try player.getDuration(), 120)
-    }
-
     func testMpvPlayerTracksSeekOffset() throws {
         let server = FakeServer()
         let controller = FakeMpvController()

@@ -6,7 +6,7 @@
 
 The TranscoderTUI SHALL use the Player protocol for all playback queries and controls, eliminating `if useMpv` conditional branches.
 
-**Related**: player-protocol, mpv-player, chromecast-player, server-player
+**Related**: player-protocol, mpv-player, chromecast-player
 
 #### Scenario: Query position through Player protocol
 **Given** TUI has a Player instance (MpvPlayer or ChromecastPlayer)
@@ -25,7 +25,7 @@ The TranscoderTUI SHALL use the Player protocol for all playback queries and con
 **When** user presses space bar to toggle pause
 **Then** TUI calls `player.isPaused()`
 **Then** TUI calls `player.pause()` or `player.resume()` based on current state
-**And** the operation works identically for mpv, Chromecast, or server fallback
+**And** the operation works identically for mpv or Chromecast modes
 
 ## REMOVED Requirements
 

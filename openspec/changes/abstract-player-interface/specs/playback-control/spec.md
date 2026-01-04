@@ -23,7 +23,7 @@ The system SHALL expose a `Player` protocol with methods `getPosition()`, `getDu
 The system SHALL provide a `PlayerError` enum to normalize backend failures, including at minimum: `statusUnavailable`, `unsupportedOperation`, `commandFailed`, and `disconnected`.
 
 #### Scenario: Unsupported reload operation
-- **WHEN** TranscoderTUI calls `player.reload(url:)` on a backend that cannot reload streams (e.g., server-backed player)
+- **WHEN** TranscoderTUI calls `player.reload(url:)` on a backend that cannot reload streams
 - **THEN** the player throws `PlayerError.unsupportedOperation`
 
 #### Scenario: Missing status
@@ -49,9 +49,7 @@ Player instances SHALL be constructed with already-initialized backends (e.g., c
 - **AND** `reload(url:)` loads the provided stream into the current session without creating a new client connection
 
 #### Scenario: Server lifecycle responsibility
-- **WHEN** TranscoderTUI constructs a ServerPlayer
-- **THEN** it reuses an already-running `TranscodeServer`
-- **AND** `reload(url:)` throws `PlayerError.unsupportedOperation` instead of restarting the server
+- (Removed) ServerPlayer no longer supported; TUI requires mpv or Chromecast device
 
 ### Requirement: Chromecast Media Status Tracking
 The system SHALL parse Chromecast `MEDIA_STATUS` messages into a `MediaStatus` value containing `currentTime` (seconds), `duration` (seconds), `playerState` (`PLAYING`, `PAUSED`, `BUFFERING`, `IDLE`), and `mediaSessionId`, and SHALL expose the latest value via `CastV2Client.latestMediaStatus`. ChromecastPlayer SHALL ignore stale status messages whose `mediaSessionId` does not match the current session and MAY surface idle reasons for diagnostics.

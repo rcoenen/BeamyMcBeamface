@@ -29,13 +29,7 @@
 ## Phase 2: Player Implementations
 
 ### 3. Implement ServerPlayer
-- [x] Create `Sources/BeamyKit/Player/ServerPlayer.swift`
-- [x] Implement Player protocol delegating to TranscodeServer
-- [x] `getPosition()` returns `server.currentPosition`
-- [x] `isPaused()` returns `server.isPaused`
-- [x] `pause()`, `resume()`, `seek(to:)` delegate to server methods
-- [x] `reload(url:)` throws unsupported error (server doesn't reload streams)
-- **Validation**: ServerPlayer compiles, delegates correctly to server
+- [x] (Removed) ServerPlayer no longer needed; TUI requires real player device (mpv/Chromecast)
 
 ### 4. Implement MpvPlayer
 - [x] Create `Sources/BeamyKit/Player/MpvPlayer.swift`
@@ -72,13 +66,13 @@
 ### 7. Refactor getCurrentPosition() to use Player
 - [x] Replace `if useMpv { ... } else { ... }` with `try? player.getPosition()`
 - [x] Remove `lastSeekPosition + playbackTime` calculation (now in MpvPlayer)
-- [x] Add fallback to `server.currentPosition` on error
+- [x] Use last-known player position on error (no server fallback)
 - [x] Remove `isSeekInProgress` check (if MpvPlayer handles it internally)
 - **Validation**: Position display works identically for mpv mode
 
 ### 8. Refactor getIsPaused() to use Player
 - [x] Replace `if useMpv { ... } else { ... }` with `try? player.isPaused()`
-- [x] Add fallback to `server.isPaused` on error
+- [x] Use last-known player pause state on error (no server fallback)
 - [x] Remove `pauseStateDuringSeek` logic (if no longer needed)
 - **Validation**: Pause icon displays correctly, no flicker during seeks
 
@@ -86,7 +80,7 @@
 - [x] Replace `if useMpv { ... } else { ... }` with Player calls
 - [x] Use `try player.isPaused()` then `try player.pause()` or `try player.resume()`
 - [x] Remove `intendedPauseState` tracking
-- [x] Add error handling fallback to server
+- [x] Use player state only; no server-driven UI fallback
 - **Validation**: Space bar toggles pause/play correctly for mpv
 
 ### 10. Refactor seek() to use Player
@@ -124,11 +118,10 @@
 - **Validation**: TUI controls Chromecast, displays actual playback position
 
 ### 15. Add unit tests for Player implementations
-- [x] Test ServerPlayer delegates correctly to TranscodeServer
 - [x] Test MpvPlayer calculates position correctly after seek
 - [x] Test ChromecastPlayer parses MediaStatus correctly
 - [x] Test error handling in all implementations
-- **Validation**: All tests pass
+- **Validation**: All tests pass (3/3)
 
 ### 16. Update documentation
 - [x] Add Player protocol documentation
