@@ -27,6 +27,9 @@ struct TranscodeTest: ParsableCommand {
     @Option(name: .long, help: "Chromecast device name or IP to control via TUI")
     var chromecast: String?
 
+    @Flag(help: "Use TermKit-based UI instead of ANSI TUI")
+    var termkit: Bool = false
+
     func run() throws {
         // Clear old logs
         try? FileManager.default.removeItem(atPath: "/tmp/beamy-tui.log")
@@ -67,9 +70,11 @@ struct TranscodeTest: ParsableCommand {
             try runChromecastMode(server: server, duration: mediaInfo.duration, deviceNameOrIP: chromecast, title: inputURL.deletingPathExtension().lastPathComponent)
         } else if auto {
             runAutomatedTest(server: server)
-        } else if tui || mpv {
+        } else if tui || mpv || termkit {
             if mpv {
                 try runMpvTUIMode(server: server, duration: mediaInfo.duration)
+            } else if termkit {
+                throw ValidationError("TermKit mode currently requires --mpv or --chromecast")
             } else {
                 throw ValidationError("TUI mode requires --mpv or --chromecast (ffplay fallback is no longer supported)")
             }
@@ -140,16 +145,21 @@ struct TranscodeTest: ParsableCommand {
         let controller = MpvController()
         _ = try controller.launch(url: server.url, windowTitle: "Beamy Player (mpv)")
         let player = MpvPlayer(controller: controller, server: server, streamURL: server.url)
-        let tui = TranscoderTUI(
-            server: server,
-            duration: duration,
-            player: player,
-            playerLabel: "mpv IPC",
-            onCleanup: {
-                controller.quit()
-            }
-        )
-        try tui.run()
+        if termkit {
+            let ui = TermKitTranscoderUI(player: player, duration: duration)
+            try ui.run()
+        } else {
+            let tui = TranscoderTUI(
+                server: server,
+                duration: duration,
+                player: player,
+                playerLabel: "mpv IPC",
+                onCleanup: {
+                    controller.quit()
+                }
+            )
+            try tui.run()
+        }
     }
 
     private func runChromecastMode(server: TranscodeServer, duration: TimeInterval, deviceNameOrIP: String, title: String) throws {
@@ -160,13 +170,18 @@ struct TranscodeTest: ParsableCommand {
         try client.launchDefaultMediaReceiver()
         try client.loadMedia(url: server.url, contentType: "video/mp2t", title: title, isLive: true)
         let player = ChromecastPlayer(client: client)
-        let tui = TranscoderTUI(
-            server: server,
-            duration: duration,
-            player: player,
-            playerLabel: "chromecast"
-        )
-        try tui.run()
+        if termkit {
+            let ui = TermKitTranscoderUI(player: player, duration: duration)
+            try ui.run()
+        } else {
+            let tui = TranscoderTUI(
+                server: server,
+                duration: duration,
+                player: player,
+                playerLabel: "chromecast"
+            )
+            try tui.run()
+        }
     }
 
     private func resolveDevice(nameOrIP: String) throws -> ChromecastDevice {
@@ -174,22 +189,6 @@ struct TranscodeTest: ParsableCommand {
             return device
         }
         throw ValidationError("Chromecast device not found: \(nameOrIP)")
-    }
-
-    private func launchFFplayDetached(url: URL) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = [
-            "-c",
-            "exec ffplay -i '\(url.absoluteString)' -window_title 'Beamy Player' -autoexit -loglevel quiet"
-        ]
-        task.standardInput = FileHandle.nullDevice
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            try? task.run()
-        }
     }
 
     private func runInteractiveMode(server: TranscodeServer) {

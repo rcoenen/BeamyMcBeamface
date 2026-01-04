@@ -15,6 +15,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(url: "https://github.com/LebJe/TOMLKit", from: "0.5.0"),
         .package(url: "https://github.com/onevcat/Rainbow", from: "4.0.0"),
+        .package(url: "https://github.com/migueldeicaza/TermKit.git", branch: "main"),
     ],
     targets: [
         // Shared library
@@ -31,6 +32,7 @@ let package = Package(
                 "BeamyKit",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Rainbow", package: "Rainbow"),
+                .product(name: "TermKit", package: "TermKit"),
             ]
         ),
         .testTarget(
