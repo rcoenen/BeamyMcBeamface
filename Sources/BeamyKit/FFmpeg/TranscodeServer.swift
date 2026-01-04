@@ -29,33 +29,10 @@ public final class TranscodeServer: @unchecked Sendable {
     /// Current pause state - true if FFmpeg is paused (SIGSTOP)
     public private(set) var isPaused: Bool = false
 
-    /// Position where last seek occurred (or 0 if never seeked)
-    private var seekPosition: TimeInterval = 0
-
-    /// Wall-clock time when playback started (after buffering)
-    private var playbackStartTime: Date?
-
-    /// Total time spent paused (accumulated across all pause/resume cycles)
-    private var accumulatedPauseTime: TimeInterval = 0
-
-    /// Wall-clock time when current pause started
-    private var pauseStartTime: Date?
-
-    /// Current playback position based on wall-clock time
-    /// This reflects what the user sees, not FFmpeg's encoding position
-    public var currentPosition: TimeInterval {
-        guard let startTime = playbackStartTime else {
-            return seekPosition
-        }
-
-        if isPaused, let pauseStart = pauseStartTime {
-            // Paused: return position when pause started
-            return seekPosition + pauseStart.timeIntervalSince(startTime) - accumulatedPauseTime
-        } else {
-            // Playing: return current wall-clock position
-            return seekPosition + Date().timeIntervalSince(startTime) - accumulatedPauseTime
-        }
-    }
+    /// Current playback position from FFmpeg's out_time
+    /// This is the timestamp of frames being output, which matches what ffplay displays
+    /// (with only ~1-2s of buffer delay, not the 20s we saw with wall-clock tracking)
+    public private(set) var currentPosition: TimeInterval = 0
 
     /// Callback for state changes (isPaused, currentPosition)
     public var onStateChanged: ((_ isPaused: Bool, _ position: TimeInterval) -> Void)?
@@ -268,7 +245,7 @@ public final class TranscodeServer: @unchecked Sendable {
             }
         }
 
-        // Parse stderr for progress
+        // Parse stderr for progress - this is the source of truth for position
         Thread.detachNewThread { [weak self] in
             stderrStarted.signal()  // Signal that we're ready to read
             var textBuffer = ""
@@ -285,7 +262,8 @@ public final class TranscodeServer: @unchecked Sendable {
                     self?.log("Progress received: \(text)")
 
                     // Parse out_time=HH:MM:SS.ffffff from -progress output
-                    // Use raw string literal to avoid escaping issues
+                    // out_time is the timestamp of frames being output to ffplay
+                    // With -copyts, this reflects the actual source file position
                     if let range = textBuffer.range(of: #"out_time=(\d{2}):(\d{2}):(\d{2}\.\d+)"#, options: .regularExpression) {
                         let timeStr = textBuffer[range].dropFirst(9) // Remove "out_time="
                         self?.log("Matched time string: \(timeStr)")
@@ -294,12 +272,17 @@ public final class TranscodeServer: @unchecked Sendable {
                            let h = Double(parts[0]),
                            let m = Double(parts[1]),
                            let s = Double(parts[2]) {
-                            let encodedTime = h * 3600 + m * 60 + s
-                            // Add seek position to get actual source position
-                            let sourceTime = (self?.currentSeekPosition ?? 0) + encodedTime
-                            self?.log("Parsed time: \(encodedTime) + seek: \(self?.currentSeekPosition ?? 0) = \(sourceTime)")
-                            // Call directly - DispatchQueue.main doesn't work in CLI without run loop
-                            onProgress?(sourceTime)
+                            let position = h * 3600 + m * 60 + s
+                            self?.log("FFmpeg out_time position: \(position)")
+
+                            // Update currentPosition - this IS the source of truth
+                            self?.currentPosition = position
+
+                            // Notify callbacks
+                            onProgress?(position)
+                            if let isPaused = self?.isPaused {
+                                self?.onStateChanged?(isPaused, position)
+                            }
                         }
                     }
 
@@ -320,12 +303,6 @@ public final class TranscodeServer: @unchecked Sendable {
         do {
             try ffmpeg.run()
             self.ffmpegProcess = ffmpeg
-
-            // Initialize playback start time if this is first playback
-            if playbackStartTime == nil {
-                playbackStartTime = Date()
-            }
-
             log("FFmpeg started at position \(formatTime(position))")
         } catch {
             log("Failed to start FFmpeg: \(error)")
@@ -357,29 +334,20 @@ public final class TranscodeServer: @unchecked Sendable {
         guard !isPaused, let process = ffmpegProcess, process.isRunning else { return }
 
         isPaused = true
-        pauseStartTime = Date()
         kill(process.processIdentifier, SIGSTOP)
 
-        let position = currentPosition
-        onStateChanged?(isPaused, position)
-        log("Paused at \(formatTime(position))")
+        onStateChanged?(isPaused, currentPosition)
+        log("Paused at \(formatTime(currentPosition))")
     }
 
     public func resume() {
         guard isPaused, let process = ffmpegProcess, process.isRunning else { return }
 
-        // Accumulate paused time
-        if let pauseStart = pauseStartTime {
-            accumulatedPauseTime += Date().timeIntervalSince(pauseStart)
-        }
-
         isPaused = false
-        pauseStartTime = nil
         kill(process.processIdentifier, SIGCONT)
 
-        let position = currentPosition
-        onStateChanged?(isPaused, position)
-        log("Resumed at \(formatTime(position))")
+        onStateChanged?(isPaused, currentPosition)
+        log("Resumed at \(formatTime(currentPosition))")
     }
 
     /// Toggle between play and pause
@@ -398,12 +366,11 @@ public final class TranscodeServer: @unchecked Sendable {
 
         log("Seeking to \(formatTime(time))...")
 
-        // Update position tracking
-        seekPosition = time
-        currentSeekPosition = time  // Keep for backward compatibility with progress parsing
-        playbackStartTime = Date()
-        accumulatedPauseTime = 0
-        pauseStartTime = nil
+        // Update seek position for FFmpeg -ss argument
+        currentSeekPosition = time
+
+        // Reset currentPosition - will be updated by FFmpeg progress
+        currentPosition = time
 
         // Stop current FFmpeg
         if let process = ffmpegProcess, process.isRunning {
