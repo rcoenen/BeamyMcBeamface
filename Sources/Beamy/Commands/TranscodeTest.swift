@@ -218,6 +218,11 @@ class TranscoderTUI: @unchecked Sendable {
     private var isRunning = true
     private var lastSeekPosition: TimeInterval = 0
     private var lastSeekTime: Date?
+    private var isSeekInProgress: Bool = false  // Flag: seek is happening, mpv state unreliable
+    private var pauseStateDuringSeek: Bool = false  // Remember pause state during seek
+    private var intendedPauseState: Bool = false  // Track what pause state we WANT (for rapid seeks)
+    private var seekCompletionSemaphore: DispatchSemaphore?
+    private var isWaitingForFFmpeg = false
 
     init(server: TranscodeServer, duration: TimeInterval, useMpv: Bool = false) {
         self.server = server
@@ -235,6 +240,15 @@ class TranscoderTUI: @unchecked Sendable {
             }
         }
         // mpv mode: We'll poll mpv directly for position
+
+        // Listen for FFmpeg lifecycle events (both mpv and ffplay modes)
+        server.onFFmpegStateChanged = { [weak self] isRunning in
+            if isRunning && (self?.isWaitingForFFmpeg ?? false) {
+                self?.log("FFmpeg started after seek, signaling completion")
+                self?.seekCompletionSemaphore?.signal()
+                self?.isWaitingForFFmpeg = false
+            }
+        }
     }
 
     func run() throws {
@@ -373,10 +387,12 @@ class TranscoderTUI: @unchecked Sendable {
                     // Resume: first FFmpeg, then mpv
                     server.resume()
                     try mpv.resume()
+                    intendedPauseState = false  // Track: now playing
                 } else {
                     // Pause: first mpv (instant), then FFmpeg (stop buffer growth)
                     try mpv.pause()
                     server.pause()
+                    intendedPauseState = true  // Track: now paused
                 }
             } catch {
                 // Fallback to server-only control
@@ -389,31 +405,82 @@ class TranscoderTUI: @unchecked Sendable {
 
     private func seek(to time: TimeInterval) {
         log("=== SEEK to \(time)s ===")
+
+        // Remember pause state before seek to preserve it
+        // Use intendedPauseState instead of querying mpv to avoid race conditions during rapid seeks
+        let wasPausedBeforeSeek: Bool
+        if useMpv {
+            // During rapid seeks, mpv.isPaused() is unreliable because pause commands are async
+            // Use our tracked intended state instead
+            wasPausedBeforeSeek = intendedPauseState
+            log("SEEK: Video was \(wasPausedBeforeSeek ? "PAUSED" : "PLAYING") before seek (intended state)")
+        } else {
+            wasPausedBeforeSeek = server.isPaused
+        }
+
+        // Mark seek as in progress - mpv state becomes unreliable
+        isSeekInProgress = true
+        pauseStateDuringSeek = wasPausedBeforeSeek
+
         lastSeekPosition = time
         lastSeekTime = Date()
+
+        // CRITICAL: Reset flag synchronously at function exit (defer)
+        // Don't use async - causes race conditions on rapid seeks
+        defer {
+            isSeekInProgress = false
+        }
+
         if useMpv, let mpv = mpvController {
-            // Server prepares for reconnect, kills FFmpeg
+            // Create semaphore for this seek operation
+            let semaphore = DispatchSemaphore(value: 0)
+            seekCompletionSemaphore = semaphore
+            isWaitingForFFmpeg = true
+
+            // Server kills FFmpeg (triggers onFFmpegStateChanged: false)
             server.seek(to: time, awaitClientReconnect: true)
-            // Tell mpv to reload - clears buffer, reconnects
+
+            // mpv reconnects, triggers handleNewConnection() -> startFFmpeg()
             try? mpv.reloadStream(server.url)
 
-            // Wait for mpv to reconnect and FFmpeg to restart before pausing
-            // Otherwise pause() returns early because FFmpeg isn't running yet
-            usleep(300_000)  // 300ms - enough for reconnect + FFmpeg startup
+            // Wait for FFmpeg restart signal (max 2s timeout)
+            log("SEEK: Waiting for FFmpeg to restart...")
+            let result = semaphore.wait(timeout: .now() + 2.0)
 
-            // Pause after seek so user sees the frame
-            server.pause()
-            try? mpv.pause()
+            if result == .timedOut {
+                log("SEEK: WARNING - FFmpeg restart timed out after 2s")
+                isWaitingForFFmpeg = false
+            } else {
+                log("SEEK: FFmpeg confirmed running, seek complete")
+            }
+
+            // Preserve pause state: if was paused before, pause after seek
+            if wasPausedBeforeSeek {
+                log("SEEK: Restoring paused state")
+                try? mpv.pause()
+                server.pause()
+                intendedPauseState = true  // Track intended state
+            } else {
+                intendedPauseState = false  // Video should be playing
+            }
+
+            // defer will reset isSeekInProgress
         } else {
             server.seek(to: time)
-            server.pause()
+            if wasPausedBeforeSeek {
+                server.pause()
+                intendedPauseState = true
+            } else {
+                intendedPauseState = false
+            }
+            // defer will reset isSeekInProgress
         }
     }
 
     private func getCurrentPosition() -> TimeInterval {
-        // After a seek, mpv takes time to reload - playback-time is stale
-        // Use the seek target directly during the grace period
-        if let seekTime = lastSeekTime, Date().timeIntervalSince(seekTime) < 2 {
+        // During seek, mpv's playback-time is stale (stream reloading)
+        // Use the seek target until seek completes
+        if isSeekInProgress {
             return lastSeekPosition
         }
 
@@ -423,6 +490,13 @@ class TranscoderTUI: @unchecked Sendable {
                 // But we can use it as a relative offset: actual = seekTarget + playback-time
                 let playbackTime = try mpv.getPosition()
                 let actual = lastSeekPosition + playbackTime
+
+                // DEBUG: Log ALL position queries to see settling behavior
+                let timeSinceSeek = lastSeekTime.map { Date().timeIntervalSince($0) } ?? 999
+                if timeSinceSeek < 1.0 {
+                    log("POS: \(timeSinceSeek)s after seek, mpv=\(playbackTime)s, actual=\(actual)s, seekTarget=\(lastSeekPosition)s")
+                }
+
                 return actual
             } catch {
                 // Fallback to server position if mpv query fails
@@ -433,10 +507,10 @@ class TranscoderTUI: @unchecked Sendable {
     }
 
     private func getIsPaused() -> Bool {
-        // During seek grace period, we know we'll end up paused (seek always pauses)
-        // Show paused state immediately to avoid icon flicker
-        if let seekTime = lastSeekTime, Date().timeIntervalSince(seekTime) < 0.5 {
-            return true
+        // During seek, mpv's isPaused is unreliable (stream reloading)
+        // Use the preserved state until seek completes (event-driven, no magic timeouts)
+        if isSeekInProgress {
+            return pauseStateDuringSeek
         }
 
         if useMpv, let mpv = mpvController {

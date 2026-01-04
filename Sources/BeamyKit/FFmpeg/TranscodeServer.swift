@@ -57,6 +57,9 @@ public final class TranscodeServer: @unchecked Sendable {
     /// Callback for progress updates (current time in seconds, source position)
     public var onProgress: (@Sendable (TimeInterval) -> Void)?
 
+    /// Callback for FFmpeg process state changes
+    public var onFFmpegStateChanged: ((_ isRunning: Bool) -> Void)?
+
     public var url: URL {
         URL(string: "http://\(getLocalIPAddress()):\(port)/stream.ts")!
     }
@@ -179,6 +182,7 @@ public final class TranscodeServer: @unchecked Sendable {
             // Don't wait - just invalidate and move on
             ffmpegProcess = nil
             log("FFmpeg killed")
+            notifyFFmpegStateChange(false)
         }
     }
 
@@ -226,6 +230,9 @@ public final class TranscodeServer: @unchecked Sendable {
             "-level", "3.1",
             "-preset", config.preset,
             "-crf", "\(config.crf)",
+            "-g", "30",           // Keyframe every 30 frames (~1 second at 30fps)
+            "-keyint_min", "30",  // Minimum keyframe interval
+            "-sc_threshold", "0", // Disable scene change detection (consistent keyframes)
         ]
 
         // Audio settings
@@ -348,6 +355,7 @@ public final class TranscodeServer: @unchecked Sendable {
             try ffmpeg.run()
             self.ffmpegProcess = ffmpeg
             log("FFmpeg started at position \(formatTime(position))")
+            notifyFFmpegStateChange(true)
         } catch {
             log("Failed to start FFmpeg: \(error)")
         }
@@ -360,10 +368,16 @@ public final class TranscodeServer: @unchecked Sendable {
         return String(format: "%02d:%02d:%02d", h, m, s)
     }
 
+    private func notifyFFmpegStateChange(_ isRunning: Bool) {
+        onFFmpegStateChanged?(isRunning)
+        log("FFmpeg state changed: isRunning=\(isRunning)")
+    }
+
     public func stop() {
         isRunning = false
         isStreaming = false
         ffmpegProcess?.terminate()
+        notifyFFmpegStateChange(false)
         if clientSocket >= 0 {
             close(clientSocket)
             clientSocket = -1
