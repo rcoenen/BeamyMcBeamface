@@ -167,6 +167,11 @@ public final class MpvController: @unchecked Sendable {
         _ = try sendCommand(["seek", time, "absolute"])
     }
 
+    /// Reload the current stream (clears buffer, starts fresh)
+    public func reloadStream(_ url: URL) throws {
+        _ = try sendCommand(["loadfile", url.absoluteString, "replace"])
+    }
+
     // MARK: - IPC Communication
 
     /// Send a command and receive response

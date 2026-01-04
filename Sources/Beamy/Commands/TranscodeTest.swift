@@ -25,6 +25,10 @@ struct TranscodeTest: ParsableCommand {
     var mpv: Bool = false
 
     func run() throws {
+        // Clear old logs
+        try? FileManager.default.removeItem(atPath: "/tmp/beamy-tui.log")
+        try? FileManager.default.removeItem(atPath: "/tmp/beamy-transcoder-debug.log")
+
         let inputURL = URL(fileURLWithPath: inputFile)
 
         // Verify file exists
@@ -152,13 +156,13 @@ struct TranscodeTest: ParsableCommand {
             } else if trimmed == "r" {
                 print("Resuming...")
                 server.resume()
-            } else if trimmed.hasPrefix("s ") {
-                let timeStr = String(trimmed.dropFirst(2))
+            } else if trimmed.hasPrefix("s"), let match = trimmed.firstMatch(of: /^s\s*(.+)/) {
+                let timeStr = String(match.1)
                 if let seconds = parseTime(timeStr) {
                     print("Seeking to \(formatTime(seconds))...")
                     server.seek(to: seconds)
                 } else {
-                    print("Invalid time format. Use seconds (e.g., 's 1800' for 30:00)")
+                    print("Invalid time format. Use seconds (e.g., 's1800' or 's 30:00')")
                 }
             } else if trimmed == "q" {
                 print("Stopping...")
@@ -293,9 +297,10 @@ class TranscoderTUI: @unchecked Sendable {
                 }
             case 10, 13: // Enter - submit command
                 let cmd = inputBuffer.trimmingCharacters(in: .whitespaces).lowercased()
-                if cmd.hasPrefix("s ") {
-                    let timeStr = String(cmd.dropFirst(2))
-                    if let seconds = Double(timeStr) {
+                if cmd.hasPrefix("s") {
+                    let numPart = cmd.dropFirst().trimmingCharacters(in: .whitespaces)
+                    if let seconds = Double(numPart) {
+                        log("Seeking to \(seconds)s")
                         seek(to: seconds)
                     }
                 }
@@ -343,9 +348,15 @@ class TranscoderTUI: @unchecked Sendable {
     }
 
     private func seek(to time: TimeInterval) {
-        // Always restart FFmpeg at new position
-        server.seek(to: time)
-        // mpv will receive new stream data automatically
+        log("=== SEEK to \(time)s ===")
+        if useMpv, let mpv = mpvController {
+            // Server prepares for reconnect, kills FFmpeg
+            server.seek(to: time, awaitClientReconnect: true)
+            // Tell mpv to reload - clears buffer, reconnects
+            try? mpv.reloadStream(server.url)
+        } else {
+            server.seek(to: time)
+        }
     }
 
     private func getCurrentPosition() -> TimeInterval {
@@ -431,12 +442,51 @@ class TranscoderTUI: @unchecked Sendable {
 
     // MARK: - Helpers
 
+    private let logFile = "/tmp/beamy-tui.log"
+
+    private func log(_ message: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logFile) {
+                if let handle = FileHandle(forWritingAtPath: logFile) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    handle.closeFile()
+                }
+            } else {
+                FileManager.default.createFile(atPath: logFile, contents: data)
+            }
+        }
+    }
+
     private func formatTime(_ seconds: TimeInterval) -> String {
         guard seconds.isFinite && !seconds.isNaN else { return "00:00:00" }
         let h = Int(seconds) / 3600
         let m = (Int(seconds) % 3600) / 60
         let s = Int(seconds) % 60
         return String(format: "%02d:%02d:%02d", h, m, s)
+    }
+
+    private func parseTime(_ str: String) -> TimeInterval? {
+        // Try parsing as seconds
+        if let seconds = Double(str) {
+            return seconds
+        }
+        // Try parsing as MM:SS or HH:MM:SS
+        let parts = str.split(separator: ":")
+        if parts.count == 2,
+           let m = Double(parts[0]),
+           let s = Double(parts[1]) {
+            return m * 60 + s
+        }
+        if parts.count == 3,
+           let h = Double(parts[0]),
+           let m = Double(parts[1]),
+           let s = Double(parts[2]) {
+            return h * 3600 + m * 60 + s
+        }
+        return nil
     }
 
     // MARK: - Terminal Control

@@ -126,6 +126,7 @@ public final class TranscodeServer: @unchecked Sendable {
     }
 
     private func handleNewConnection(_ socket: Int32) {
+        log("NEW CONNECTION: socket=\(socket), awaitingClientReconnect=\(awaitingClientReconnect)")
         prepareForNewClient()
 
         var noSigPipe: Int32 = 1
@@ -156,7 +157,9 @@ public final class TranscodeServer: @unchecked Sendable {
         self.streamingQueue = DispatchQueue(label: "com.beamy.streaming", qos: .userInitiated)
 
         // Start FFmpeg at current seek position
+        log("NEW CONNECTION: Starting FFmpeg at position \(formatTime(currentSeekPosition))")
         startFFmpeg(at: currentSeekPosition)
+        log("NEW CONNECTION: FFmpeg started, streaming should begin")
     }
 
     private func prepareForNewClient() {
@@ -170,11 +173,12 @@ public final class TranscodeServer: @unchecked Sendable {
         }
 
         if let process = ffmpegProcess, process.isRunning {
-            log("Terminating FFmpeg for new client")
-            process.terminate()
-            process.waitUntilExit()
+            log("Killing FFmpeg for new client (pid=\(process.processIdentifier))")
+            // Use SIGKILL instead of terminate() - FFmpeg may be blocked on pipe writes
+            kill(process.processIdentifier, SIGKILL)
+            // Don't wait - just invalidate and move on
             ffmpegProcess = nil
-            log("Old FFmpeg terminated for new client")
+            log("FFmpeg killed")
         }
     }
 
@@ -199,11 +203,14 @@ public final class TranscodeServer: @unchecked Sendable {
             args += ["-ss", String(format: "%.3f", position)]
         }
 
-        // Preserve original timestamps so progress reflects source position
-        args += ["-copyts"]
-
         // Input file
         args += ["-i", input.path]
+
+        // Offset output timestamps to match source position
+        // (needed because -ss before -i resets timestamps to 0)
+        if position > 0 {
+            args += ["-output_ts_offset", String(format: "%.3f", position)]
+        }
 
         // Progress output to stderr (parsed for position feedback)
         // Update every 0.5 seconds for smooth UI updates
@@ -230,9 +237,12 @@ public final class TranscodeServer: @unchecked Sendable {
         ]
 
         // Output format - flush immediately to prevent buffering issues
+        // Force keyframe at start and resend headers for clean seek transitions
         args += [
+            "-force_key_frames", "expr:eq(n,0)",
             "-flush_packets", "1",
-            "-fflags", "+flush_packets",
+            "-fflags", "+flush_packets+genpts",
+            "-mpegts_flags", "+resend_headers",
             "-f", "mpegts",
             "pipe:1"
         ]
@@ -265,21 +275,27 @@ public final class TranscodeServer: @unchecked Sendable {
 
         // Stream video data to client socket - MUST start before FFmpeg
         Thread.detachNewThread { [weak self] in
+            self?.log("Streaming thread STARTING for position \(position)")
             streamingStarted.signal()  // Signal that we're ready to read
+            var bytesTotal = 0
             while self?.isStreaming == true {
                 let data = outputHandle.availableData
-                if data.isEmpty { break }
+                if data.isEmpty {
+                    self?.log("Streaming thread got EOF after \(bytesTotal) bytes")
+                    break
+                }
+                bytesTotal += data.count
                 if let latestPts = self?.ptsTracker.consume(data) {
                     self?.updatePositionFromPts(latestPts)
                 }
                 let sent = data.withUnsafeBytes { send(clientSocket, $0.baseAddress, data.count, 0) }
                 if sent < 0 {
-                    self?.log("send() failed, stopping stream")
+                    self?.log("send() failed after \(bytesTotal) bytes, stopping stream")
                     self?.isStreaming = false
                     break
                 }
             }
-            self?.log("Streaming thread exiting, isStreaming=\(self?.isStreaming ?? false)")
+            self?.log("Streaming thread exiting, isStreaming=\(self?.isStreaming ?? false), totalBytes=\(bytesTotal)")
         }
 
         // Parse stderr for progress (debug only; not used for currentPosition).
@@ -415,23 +431,26 @@ public final class TranscodeServer: @unchecked Sendable {
         currentPosition = time
 
         if awaitClientReconnect {
+            log("SEEK: awaitClientReconnect=true, setting up for reconnect")
             awaitingClientReconnect = true
-            pendingSeekPauseAt = time
-            log("Awaiting client reconnect for seek")
+            // Don't auto-pause after seek - let video play
+            // pendingSeekPauseAt = time
+            log("SEEK: calling prepareForNewClient()")
             prepareForNewClient()
+            log("SEEK: prepareForNewClient() returned, waiting for mpv to reconnect...")
         } else {
             // Stop current FFmpeg
             if let process = ffmpegProcess, process.isRunning {
-                // First resume if stopped (SIGTERM won't work on stopped process)
-                kill(process.processIdentifier, SIGCONT)
-                process.terminate()
-                process.waitUntilExit()
-                log("Old FFmpeg terminated")
+                log("Killing FFmpeg for seek (pid=\(process.processIdentifier))")
+                kill(process.processIdentifier, SIGKILL)
+                ffmpegProcess = nil
+                log("Old FFmpeg killed")
             }
 
             // Start new FFmpeg at new position (same client socket)
             startFFmpeg(at: time)
-            pendingSeekPauseAt = time
+            // Don't auto-pause after seek
+            // pendingSeekPauseAt = time
         }
 
         // End seek in paused state, but wait until new PTS arrives so the
@@ -518,7 +537,7 @@ private final class MpegTsPtsTracker {
         while buffer.count >= 188 {
             if buffer[buffer.startIndex] != 0x47 {
                 if let syncIndex = buffer.firstIndex(of: 0x47) {
-                    buffer.removeSubrange(buffer.startIndex..<syncIndex)
+                    buffer = Data(buffer[syncIndex...])
                 } else {
                     buffer.removeAll(keepingCapacity: true)
                     break
@@ -528,12 +547,12 @@ private final class MpegTsPtsTracker {
                 }
             }
 
-            let packet = buffer.prefix(188)
+            let packet = Data(buffer.prefix(188))
             if let pts = parsePts(from: packet) {
                 lastPtsSeconds = pts
                 latest = pts
             }
-            buffer.removeFirst(188)
+            buffer = Data(buffer.dropFirst(188))
         }
 
         return latest
