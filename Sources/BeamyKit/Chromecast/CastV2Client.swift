@@ -9,6 +9,7 @@ public final class CastV2Client: @unchecked Sendable {
     private var transportId: String?
     private var sessionId: String?
     private var mediaSessionId: Int?
+    public private(set) var latestMediaStatus: MediaStatus?
     private var requestId: Int = 0
     private let verbose: Bool
 
@@ -199,6 +200,29 @@ public final class CastV2Client: @unchecked Sendable {
 
         log("LOAD message sent, waiting for playback...")
         Thread.sleep(forTimeInterval: 1)
+    }
+
+    /// Send a media control command (PLAY, PAUSE, SEEK) to the active session.
+    public func sendMediaCommand(type: String, mediaSessionId: Int? = nil, additional: [String: Any] = [:]) throws {
+        guard let transportId = transportId else {
+            throw CastV2Error.notConnected
+        }
+
+        requestId += 1
+
+        var payload = additional
+        payload["type"] = type
+        payload["requestId"] = requestId
+
+        if let sessionId = mediaSessionId ?? latestMediaStatus?.mediaSessionId ?? self.mediaSessionId {
+            payload["mediaSessionId"] = sessionId
+        }
+
+        try sendMessage(
+            namespace: nsMedia,
+            destinationId: transportId,
+            payload: payload
+        )
     }
 
     public func disconnect() {
@@ -441,10 +465,17 @@ public final class CastV2Client: @unchecked Sendable {
                 }
             case "MEDIA_STATUS":
                 if let statuses = json["status"] as? [[String: Any]],
-                   let status = statuses.first,
-                   let newMediaSessionId = status["mediaSessionId"] as? Int {
-                    log("Got media session ID: \(newMediaSessionId)")
-                    self.mediaSessionId = newMediaSessionId
+                   let status = statuses.first {
+                    if let parsedStatus = MediaStatus(dictionary: status) {
+                        log("Updated media status: session \(parsedStatus.mediaSessionId), state \(parsedStatus.playerState.rawValue), currentTime \(parsedStatus.currentTime), duration \(parsedStatus.duration)")
+                        self.mediaSessionId = parsedStatus.mediaSessionId
+                        self.latestMediaStatus = parsedStatus
+                    } else if let newMediaSessionId = (status["mediaSessionId"] as? NSNumber)?.intValue {
+                        log("Got media session ID: \(newMediaSessionId)")
+                        self.mediaSessionId = newMediaSessionId
+                    } else {
+                        log("MEDIA_STATUS received but could not parse session/state")
+                    }
                 }
             case "LOAD_FAILED":
                 log("ERROR: Media load failed!")

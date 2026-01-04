@@ -24,6 +24,9 @@ struct TranscodeTest: ParsableCommand {
     @Flag(help: "Use mpv with IPC instead of ffplay (more accurate position tracking)")
     var mpv: Bool = false
 
+    @Option(name: .long, help: "Chromecast device name or IP to control via TUI")
+    var chromecast: String?
+
     func run() throws {
         // Clear old logs
         try? FileManager.default.removeItem(atPath: "/tmp/beamy-tui.log")
@@ -60,10 +63,16 @@ struct TranscodeTest: ParsableCommand {
         print("========================================")
         print("")
 
-        if auto {
+        if let chromecast = chromecast {
+            try runChromecastMode(server: server, duration: mediaInfo.duration, deviceNameOrIP: chromecast, title: inputURL.deletingPathExtension().lastPathComponent)
+        } else if auto {
             runAutomatedTest(server: server)
         } else if tui || mpv {
-            try runTUIMode(server: server, duration: mediaInfo.duration, useMpv: mpv)
+            if mpv {
+                try runMpvTUIMode(server: server, duration: mediaInfo.duration)
+            } else {
+                try runServerTUIMode(server: server, duration: mediaInfo.duration)
+            }
         } else {
             runInteractiveMode(server: server)
         }
@@ -127,9 +136,72 @@ struct TranscodeTest: ParsableCommand {
         dispatchMain()
     }
 
-    private func runTUIMode(server: TranscodeServer, duration: TimeInterval, useMpv: Bool) throws {
-        let tui = TranscoderTUI(server: server, duration: duration, useMpv: useMpv)
+    private func runMpvTUIMode(server: TranscodeServer, duration: TimeInterval) throws {
+        let controller = MpvController()
+        _ = try controller.launch(url: server.url, windowTitle: "Beamy Player (mpv)")
+        let player = MpvPlayer(controller: controller, server: server, streamURL: server.url)
+        let tui = TranscoderTUI(
+            server: server,
+            duration: duration,
+            player: player,
+            playerLabel: "mpv IPC",
+            onCleanup: {
+                controller.quit()
+            }
+        )
         try tui.run()
+    }
+
+    private func runServerTUIMode(server: TranscodeServer, duration: TimeInterval) throws {
+        launchFFplayDetached(url: server.url)
+        let player = ServerPlayer(server: server, duration: duration)
+        let tui = TranscoderTUI(
+            server: server,
+            duration: duration,
+            player: player,
+            playerLabel: "server/ffplay"
+        )
+        try tui.run()
+    }
+
+    private func runChromecastMode(server: TranscodeServer, duration: TimeInterval, deviceNameOrIP: String, title: String) throws {
+        let device = try resolveDevice(nameOrIP: deviceNameOrIP)
+        print("Connecting to Chromecast: \(device.name)...")
+        let client = CastV2Client(device: device, verbose: true)
+        try client.connect()
+        try client.launchDefaultMediaReceiver()
+        try client.loadMedia(url: server.url, contentType: "video/mp2t", title: title, isLive: true)
+        let player = ChromecastPlayer(client: client)
+        let tui = TranscoderTUI(
+            server: server,
+            duration: duration,
+            player: player,
+            playerLabel: "chromecast"
+        )
+        try tui.run()
+    }
+
+    private func resolveDevice(nameOrIP: String) throws -> ChromecastDevice {
+        if let device = try ChromecastDiscovery.findDevice(named: nameOrIP, timeout: 5.0) {
+            return device
+        }
+        throw ValidationError("Chromecast device not found: \(nameOrIP)")
+    }
+
+    private func launchFFplayDetached(url: URL) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = [
+            "-c",
+            "exec ffplay -i '\(url.absoluteString)' -window_title 'Beamy Player' -autoexit -loglevel quiet"
+        ]
+        task.standardInput = FileHandle.nullDevice
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            try? task.run()
+        }
     }
 
     private func runInteractiveMode(server: TranscodeServer) {
@@ -205,72 +277,39 @@ struct TranscodeTest: ParsableCommand {
     }
 }
 
-// MARK: - TUI Mode (supports both ffplay and mpv)
+// MARK: - TUI Mode (Player-backed)
 
 class TranscoderTUI: @unchecked Sendable {
     private let server: TranscodeServer
     private let duration: TimeInterval
-    private let useMpv: Bool
-    private var needsRedraw = true
+    private let player: Player
+    private let playerLabel: String
+    private let onCleanup: (() -> Void)?
 
-    private var oldTermios: termios?
-    private var mpvController: MpvController?
     private var isRunning = true
-    private var lastSeekPosition: TimeInterval = 0
-    private var lastSeekTime: Date?
-    private var isSeekInProgress: Bool = false  // Flag: seek is happening, mpv state unreliable
-    private var pauseStateDuringSeek: Bool = false  // Remember pause state during seek
-    private var intendedPauseState: Bool = false  // Track what pause state we WANT (for rapid seeks)
-    private var seekCompletionSemaphore: DispatchSemaphore?
-    private var isWaitingForFFmpeg = false
+    private var oldTermios: termios?
+    private let logFile = "/tmp/beamy-tui.log"
+    private var lastKnownPlayerPaused: Bool = false
+    private var lastKnownPosition: TimeInterval = 0
 
-    init(server: TranscodeServer, duration: TimeInterval, useMpv: Bool = false) {
+    init(server: TranscodeServer, duration: TimeInterval, player: Player, playerLabel: String, onCleanup: (() -> Void)? = nil) {
         self.server = server
         self.duration = duration
-        self.useMpv = useMpv
-
-        if !useMpv {
-            // ffplay mode: Listen for state changes from server
-            server.onStateChanged = { [weak self] isPaused, position in
-                self?.needsRedraw = true
-            }
-
-            server.onProgress = { [weak self] position in
-                self?.needsRedraw = true
-            }
-        }
-        // mpv mode: We'll poll mpv directly for position
-
-        // Listen for FFmpeg lifecycle events (both mpv and ffplay modes)
-        server.onFFmpegStateChanged = { [weak self] isRunning in
-            if isRunning && (self?.isWaitingForFFmpeg ?? false) {
-                self?.log("FFmpeg started after seek, signaling completion")
-                self?.seekCompletionSemaphore?.signal()
-                self?.isWaitingForFFmpeg = false
-            }
-        }
+        self.player = player
+        self.playerLabel = playerLabel
+        self.onCleanup = onCleanup
     }
 
     func run() throws {
         // Clear screen and hide cursor
         print("\u{001B}[2J\u{001B}[?25l")
-
-        if useMpv {
-            try launchMpv()
-            print("\u{001B}[10;1H" + "Using mpv with IPC (accurate position)".green)
-        } else {
-            launchFFplayDetached()
-            print("\u{001B}[10;1H" + "Using ffplay (position may lag ~7s)".yellow)
-        }
-
-        // Wait for player to connect
-        sleep(2)
+        print("\u{001B}[10;1H" + "Using \(playerLabel)".green)
 
         // Start display update thread
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             while self?.isRunning == true {
                 self?.drawUI()
-                usleep(250_000) // Update every 250ms (faster for mpv accuracy)
+                usleep(250_000) // Update every 250ms
             }
         }
 
@@ -366,161 +405,47 @@ class TranscoderTUI: @unchecked Sendable {
     }
 
     private func scrub(offset: TimeInterval) {
-        log("=== SCRUB START \(offset > 0 ? "→" : "←") offset=\(offset)s ===")
-
-        // Use server.currentPosition as source of truth since it tracks FFmpeg PTS accurately
         let currentTime = getCurrentPosition()
-        log("SCRUB: Using server.currentPosition: \(currentTime)s")
-
-        // Calculate new position and seek
         let newPosition = max(0, currentTime + offset)
-        log("SCRUB: Calculation: \(currentTime)s + \(offset)s = \(newPosition)s")
         seek(to: newPosition)
-        log("=== SCRUB END ===")
     }
 
     private func togglePlayPause() {
-        if useMpv, let mpv = mpvController {
-            do {
-                let paused = try mpv.isPaused()
-                if paused {
-                    // Resume: first FFmpeg, then mpv
-                    server.resume()
-                    try mpv.resume()
-                    intendedPauseState = false  // Track: now playing
-                } else {
-                    // Pause: first mpv (instant), then FFmpeg (stop buffer growth)
-                    try mpv.pause()
-                    server.pause()
-                    intendedPauseState = true  // Track: now paused
-                }
-            } catch {
-                // Fallback to server-only control
-                server.togglePlayPause()
+        do {
+            let paused = try player.isPaused()
+            if paused {
+                try player.resume()
+            } else {
+                try player.pause()
             }
-        } else {
+        } catch {
+            // Fallback to server-only control if player unavailable
             server.togglePlayPause()
         }
     }
 
     private func seek(to time: TimeInterval) {
-        log("=== SEEK to \(time)s ===")
-
-        // Remember pause state before seek to preserve it
-        // Use intendedPauseState instead of querying mpv to avoid race conditions during rapid seeks
-        let wasPausedBeforeSeek: Bool
-        if useMpv {
-            // During rapid seeks, mpv.isPaused() is unreliable because pause commands are async
-            // Use our tracked intended state instead
-            wasPausedBeforeSeek = intendedPauseState
-            log("SEEK: Video was \(wasPausedBeforeSeek ? "PAUSED" : "PLAYING") before seek (intended state)")
-        } else {
-            wasPausedBeforeSeek = server.isPaused
-        }
-
-        // Mark seek as in progress - mpv state becomes unreliable
-        isSeekInProgress = true
-        pauseStateDuringSeek = wasPausedBeforeSeek
-
-        lastSeekPosition = time
-        lastSeekTime = Date()
-
-        // CRITICAL: Reset flag synchronously at function exit (defer)
-        // Don't use async - causes race conditions on rapid seeks
-        defer {
-            isSeekInProgress = false
-        }
-
-        if useMpv, let mpv = mpvController {
-            // Create semaphore for this seek operation
-            let semaphore = DispatchSemaphore(value: 0)
-            seekCompletionSemaphore = semaphore
-            isWaitingForFFmpeg = true
-
-            // Server kills FFmpeg (triggers onFFmpegStateChanged: false)
-            server.seek(to: time, awaitClientReconnect: true)
-
-            // mpv reconnects, triggers handleNewConnection() -> startFFmpeg()
-            try? mpv.reloadStream(server.url)
-
-            // Wait for FFmpeg restart signal (max 2s timeout)
-            log("SEEK: Waiting for FFmpeg to restart...")
-            let result = semaphore.wait(timeout: .now() + 2.0)
-
-            if result == .timedOut {
-                log("SEEK: WARNING - FFmpeg restart timed out after 2s")
-                isWaitingForFFmpeg = false
-            } else {
-                log("SEEK: FFmpeg confirmed running, seek complete")
-            }
-
-            // Preserve pause state: if was paused before, pause after seek
-            if wasPausedBeforeSeek {
-                log("SEEK: Restoring paused state")
-                try? mpv.pause()
-                server.pause()
-                intendedPauseState = true  // Track intended state
-            } else {
-                intendedPauseState = false  // Video should be playing
-            }
-
-            // defer will reset isSeekInProgress
-        } else {
+        do {
+            try player.seek(to: time)
+        } catch {
             server.seek(to: time)
-            if wasPausedBeforeSeek {
-                server.pause()
-                intendedPauseState = true
-            } else {
-                intendedPauseState = false
-            }
-            // defer will reset isSeekInProgress
         }
     }
 
     private func getCurrentPosition() -> TimeInterval {
-        // During seek, mpv's playback-time is stale (stream reloading)
-        // Use the seek target until seek completes
-        if isSeekInProgress {
-            return lastSeekPosition
+        if let position = try? player.getPosition() {
+            lastKnownPosition = position
+            return position
         }
-
-        if useMpv, let mpv = mpvController {
-            do {
-                // mpv's playback-time resets after each stream reload (seek).
-                // But we can use it as a relative offset: actual = seekTarget + playback-time
-                let playbackTime = try mpv.getPosition()
-                let actual = lastSeekPosition + playbackTime
-
-                // DEBUG: Log ALL position queries to see settling behavior
-                let timeSinceSeek = lastSeekTime.map { Date().timeIntervalSince($0) } ?? 999
-                if timeSinceSeek < 1.0 {
-                    log("POS: \(timeSinceSeek)s after seek, mpv=\(playbackTime)s, actual=\(actual)s, seekTarget=\(lastSeekPosition)s")
-                }
-
-                return actual
-            } catch {
-                // Fallback to server position if mpv query fails
-                return server.currentPosition
-            }
-        }
-        return server.currentPosition
+        return lastKnownPosition
     }
 
     private func getIsPaused() -> Bool {
-        // During seek, mpv's isPaused is unreliable (stream reloading)
-        // Use the preserved state until seek completes (event-driven, no magic timeouts)
-        if isSeekInProgress {
-            return pauseStateDuringSeek
+        if let paused = try? player.isPaused() {
+            lastKnownPlayerPaused = paused
+            return paused
         }
-
-        if useMpv, let mpv = mpvController {
-            do {
-                return try mpv.isPaused()
-            } catch {
-                return server.isPaused
-            }
-        }
-        return server.isPaused
+        return lastKnownPlayerPaused
     }
 
     // MARK: - UI Drawing
@@ -543,7 +468,7 @@ class TranscoderTUI: @unchecked Sendable {
         let timeDisplay = "\(formatTime(currentPosition).bold) / \(formatTime(duration))"
         let percentDisplay = "(\(String(format: "%.1f", percent).yellow)%)"
 
-        let playerMode = useMpv ? "[mpv IPC]".green : "[ffplay]".yellow
+        let playerMode = "[\(playerLabel)]".green
 
         print("┌─ Beamy Transcoder \(playerMode) ────────────────────────────────┐".cyan.bold + "\u{001B}[K")
         print("│                                                             │".cyan + "\u{001B}[K")
@@ -560,32 +485,7 @@ class TranscoderTUI: @unchecked Sendable {
         fflush(stdout)
     }
 
-    // MARK: - Player Launch
-
-    private func launchMpv() throws {
-        mpvController = MpvController()
-        _ = try mpvController?.launch(url: server.url, windowTitle: "Beamy Player (mpv)")
-    }
-
-    private func launchFFplayDetached() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = [
-            "-c",
-            "exec ffplay -i '\(server.url.absoluteString)' -window_title 'Beamy Player' -autoexit -loglevel quiet"
-        ]
-        task.standardInput = FileHandle.nullDevice
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            try? task.run()
-        }
-    }
-
     // MARK: - Helpers
-
-    private let logFile = "/tmp/beamy-tui.log"
 
     private func log(_ message: String) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
@@ -611,27 +511,6 @@ class TranscoderTUI: @unchecked Sendable {
         return String(format: "%02d:%02d:%02d", h, m, s)
     }
 
-    private func parseTime(_ str: String) -> TimeInterval? {
-        // Try parsing as seconds
-        if let seconds = Double(str) {
-            return seconds
-        }
-        // Try parsing as MM:SS or HH:MM:SS
-        let parts = str.split(separator: ":")
-        if parts.count == 2,
-           let m = Double(parts[0]),
-           let s = Double(parts[1]) {
-            return m * 60 + s
-        }
-        if parts.count == 3,
-           let h = Double(parts[0]),
-           let m = Double(parts[1]),
-           let s = Double(parts[2]) {
-            return h * 3600 + m * 60 + s
-        }
-        return nil
-    }
-
     // MARK: - Terminal Control
 
     private func enableRawMode() {
@@ -649,7 +528,7 @@ class TranscoderTUI: @unchecked Sendable {
             tcsetattr(STDIN_FILENO, TCSAFLUSH, &old)
         }
         print("\n")
-        mpvController?.quit()
+        onCleanup?()
         server.stop()
     }
 
