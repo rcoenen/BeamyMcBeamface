@@ -21,6 +21,9 @@ struct TranscodeTest: ParsableCommand {
     @Flag(help: "Enable TUI mode (mpv-style interface)")
     var tui: Bool = false
 
+    @Flag(help: "Use mpv with IPC instead of ffplay (more accurate position tracking)")
+    var mpv: Bool = false
+
     func run() throws {
         let inputURL = URL(fileURLWithPath: inputFile)
 
@@ -55,8 +58,8 @@ struct TranscodeTest: ParsableCommand {
 
         if auto {
             runAutomatedTest(server: server)
-        } else if tui {
-            try runTUIMode(server: server, duration: mediaInfo.duration)
+        } else if tui || mpv {
+            try runTUIMode(server: server, duration: mediaInfo.duration, useMpv: mpv)
         } else {
             runInteractiveMode(server: server)
         }
@@ -120,8 +123,8 @@ struct TranscodeTest: ParsableCommand {
         dispatchMain()
     }
 
-    private func runTUIMode(server: TranscodeServer, duration: TimeInterval) throws {
-        let tui = TranscoderTUI(server: server, duration: duration)
+    private func runTUIMode(server: TranscodeServer, duration: TimeInterval, useMpv: Bool) throws {
+        let tui = TranscoderTUI(server: server, duration: duration, useMpv: useMpv)
         try tui.run()
     }
 
@@ -198,45 +201,56 @@ struct TranscodeTest: ParsableCommand {
     }
 }
 
-// MARK: - TUI Mode (mpv-inspired)
+// MARK: - TUI Mode (supports both ffplay and mpv)
 
 class TranscoderTUI: @unchecked Sendable {
     private let server: TranscodeServer
     private let duration: TimeInterval
+    private let useMpv: Bool
     private var needsRedraw = true
 
     private var oldTermios: termios?
+    private var mpvController: MpvController?
+    private var isRunning = true
 
-    init(server: TranscodeServer, duration: TimeInterval) {
+    init(server: TranscodeServer, duration: TimeInterval, useMpv: Bool = false) {
         self.server = server
         self.duration = duration
+        self.useMpv = useMpv
 
-        // Listen for state changes from server
-        server.onStateChanged = { [weak self] isPaused, position in
-            self?.needsRedraw = true
-        }
+        if !useMpv {
+            // ffplay mode: Listen for state changes from server
+            server.onStateChanged = { [weak self] isPaused, position in
+                self?.needsRedraw = true
+            }
 
-        // Keep progress callback for backward compatibility / debugging
-        server.onProgress = { [weak self] position in
-            self?.needsRedraw = true
+            server.onProgress = { [weak self] position in
+                self?.needsRedraw = true
+            }
         }
+        // mpv mode: We'll poll mpv directly for position
     }
 
     func run() throws {
         // Clear screen and hide cursor
         print("\u{001B}[2J\u{001B}[?25l")
 
-        // Launch ffplay first
-        launchFFplayDetached()
+        if useMpv {
+            try launchMpv()
+            print("\u{001B}[10;1H" + "Using mpv with IPC (accurate position)".green)
+        } else {
+            launchFFplayDetached()
+            print("\u{001B}[10;1H" + "Using ffplay (position may lag ~7s)".yellow)
+        }
 
-        // Wait for ffplay to connect
+        // Wait for player to connect
         sleep(2)
 
         // Start display update thread
-        DispatchQueue.global(qos: .userInitiated).async {
-            while true {
-                self.drawUI()
-                usleep(500_000) // Update every 500ms
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            while self?.isRunning == true {
+                self?.drawUI()
+                usleep(250_000) // Update every 250ms (faster for mpv accuracy)
             }
         }
 
@@ -247,15 +261,14 @@ class TranscoderTUI: @unchecked Sendable {
         // Draw initial UI
         sleep(1)
 
-        // Move cursor to input line (line 11)
-        print("\u{001B}[11;1H\u{001B}[K")
+        // Move cursor to input line (line 12)
+        print("\u{001B}[12;1H\u{001B}[K")
         fflush(stdout)
 
         var inputBuffer = ""
-        var running = true
 
         // Raw input loop - process keypresses immediately
-        while running {
+        while isRunning {
             var char: UInt8 = 0
             let result = read(STDIN_FILENO, &char, 1)
 
@@ -264,22 +277,18 @@ class TranscoderTUI: @unchecked Sendable {
             switch char {
             case 32: // Spacebar
                 if inputBuffer.isEmpty {
-                    // Only toggle if not typing a command
-                    server.togglePlayPause()
+                    togglePlayPause()
                 } else {
-                    // Add space to command being typed
                     inputBuffer.append(" ")
-                    print("\u{001B}[11;1H\u{001B}[K> \(inputBuffer)", terminator: "")
+                    print("\u{001B}[12;1H\u{001B}[K> \(inputBuffer)", terminator: "")
                     fflush(stdout)
                 }
             case 113: // 'q'
                 if inputBuffer.isEmpty {
-                    server.stop()
-                    running = false
+                    isRunning = false
                 } else {
-                    // Add 'q' to command
                     inputBuffer.append("q")
-                    print("\u{001B}[11;1H\u{001B}[K> \(inputBuffer)", terminator: "")
+                    print("\u{001B}[12;1H\u{001B}[K> \(inputBuffer)", terminator: "")
                     fflush(stdout)
                 }
             case 10, 13: // Enter - submit command
@@ -287,38 +296,88 @@ class TranscoderTUI: @unchecked Sendable {
                 if cmd.hasPrefix("s ") {
                     let timeStr = String(cmd.dropFirst(2))
                     if let seconds = Double(timeStr) {
-                        // Seek method now handles pause state preservation automatically
-                        server.seek(to: seconds)
+                        seek(to: seconds)
                     }
                 }
                 inputBuffer = ""
-                print("\u{001B}[11;1H\u{001B}[K> ", terminator: "")
+                print("\u{001B}[12;1H\u{001B}[K> ", terminator: "")
                 fflush(stdout)
             case 127, 8: // Backspace
                 if !inputBuffer.isEmpty {
                     inputBuffer.removeLast()
-                    print("\u{001B}[11;1H\u{001B}[K> \(inputBuffer)", terminator: "")
+                    print("\u{001B}[12;1H\u{001B}[K> \(inputBuffer)", terminator: "")
                     fflush(stdout)
                 }
             default:
-                if char >= 32 && char < 127 { // Printable ASCII
+                if char >= 32 && char < 127 {
                     inputBuffer.append(Character(UnicodeScalar(char)))
-                    print("\u{001B}[11;1H\u{001B}[K> \(inputBuffer)", terminator: "")
+                    print("\u{001B}[12;1H\u{001B}[K> \(inputBuffer)", terminator: "")
                     fflush(stdout)
                 }
             }
         }
     }
 
-    private func drawUI() {
-        // Save cursor position, move to top, draw UI, restore cursor
-        // This prevents clearing the input line where user is typing
-        print("\u{001B}7", terminator: "") // Save cursor position
-        print("\u{001B}[1;1H", terminator: "") // Move to line 1, col 1
+    // MARK: - Playback Control
 
-        // Query server for current state - server is single source of truth
-        let currentPosition = server.currentPosition
-        let isPaused = server.isPaused
+    private func togglePlayPause() {
+        if useMpv, let mpv = mpvController {
+            do {
+                let paused = try mpv.isPaused()
+                if paused {
+                    // Resume: first FFmpeg, then mpv
+                    server.resume()
+                    try mpv.resume()
+                } else {
+                    // Pause: first mpv (instant), then FFmpeg (stop buffer growth)
+                    try mpv.pause()
+                    server.pause()
+                }
+            } catch {
+                // Fallback to server-only control
+                server.togglePlayPause()
+            }
+        } else {
+            server.togglePlayPause()
+        }
+    }
+
+    private func seek(to time: TimeInterval) {
+        // Always restart FFmpeg at new position
+        server.seek(to: time)
+        // mpv will receive new stream data automatically
+    }
+
+    private func getCurrentPosition() -> TimeInterval {
+        if useMpv, let mpv = mpvController {
+            do {
+                return try mpv.getPosition()
+            } catch {
+                return server.currentPosition
+            }
+        }
+        return server.currentPosition
+    }
+
+    private func getIsPaused() -> Bool {
+        if useMpv, let mpv = mpvController {
+            do {
+                return try mpv.isPaused()
+            } catch {
+                return server.isPaused
+            }
+        }
+        return server.isPaused
+    }
+
+    // MARK: - UI Drawing
+
+    private func drawUI() {
+        print("\u{001B}7", terminator: "") // Save cursor
+        print("\u{001B}[1;1H", terminator: "") // Move to top
+
+        let currentPosition = getCurrentPosition()
+        let isPaused = getIsPaused()
 
         let percent = duration > 0 ? (currentPosition / duration) * 100 : 0
         let barWidth = 50
@@ -327,15 +386,13 @@ class TranscoderTUI: @unchecked Sendable {
         let emptyBar = String(repeating: "─", count: max(0, barWidth - filled - 1)).lightBlack
         let bar = filledBar + "●".green.bold + emptyBar
 
-        // Status icon shows NEXT action (not current state)
-        // Playing → show pause icon (will pause when pressed)
-        // Paused → show play icon (will play when pressed)
         let statusIcon = isPaused ? "▶".green : "⏸".yellow
         let timeDisplay = "\(formatTime(currentPosition).bold) / \(formatTime(duration))"
         let percentDisplay = "(\(String(format: "%.1f", percent).yellow)%)"
 
-        // Draw UI box (9 lines total)
-        print("┌─ Beamy Transcoder ─────────────────────────────────────────┐".cyan.bold + "\u{001B}[K")
+        let playerMode = useMpv ? "[mpv IPC]".green : "[ffplay]".yellow
+
+        print("┌─ Beamy Transcoder \(playerMode) ────────────────────────────────┐".cyan.bold + "\u{001B}[K")
         print("│                                                             │".cyan + "\u{001B}[K")
         print("│  \(statusIcon)  \(timeDisplay)  \(percentDisplay)".cyan + "\u{001B}[K")
         print("│                                                             │".cyan + "\u{001B}[K")
@@ -345,29 +402,34 @@ class TranscoderTUI: @unchecked Sendable {
         print("│  ".cyan + "[SPACE]".green.bold + " = Pause/Resume    ".cyan + "[s 30]".green.bold + " = Seek to 30s    ".cyan + "[q]".green.bold + " = Quit".cyan + "\u{001B}[K")
         print("└─────────────────────────────────────────────────────────────┘".cyan.bold + "\u{001B}[K")
 
-        print("\u{001B}8", terminator: "") // Restore cursor position
+        print("\u{001B}8", terminator: "") // Restore cursor
         fflush(stdout)
     }
 
+    // MARK: - Player Launch
+
+    private func launchMpv() throws {
+        mpvController = MpvController()
+        _ = try mpvController?.launch(url: server.url, windowTitle: "Beamy Player (mpv)")
+    }
+
     private func launchFFplayDetached() {
-        // Launch ffplay via shell to completely detach from our process
-        // This avoids any terminal/tty inheritance issues
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
         task.arguments = [
             "-c",
             "exec ffplay -i '\(server.url.absoluteString)' -window_title 'Beamy Player' -autoexit -loglevel quiet"
         ]
-        // Create new file handles to avoid inheriting our terminal
         task.standardInput = FileHandle.nullDevice
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
 
-        // Run async so we don't block
         DispatchQueue.global(qos: .userInitiated).async {
             try? task.run()
         }
     }
+
+    // MARK: - Helpers
 
     private func formatTime(_ seconds: TimeInterval) -> String {
         guard seconds.isFinite && !seconds.isNaN else { return "00:00:00" }
@@ -377,51 +439,29 @@ class TranscoderTUI: @unchecked Sendable {
         return String(format: "%02d:%02d:%02d", h, m, s)
     }
 
-    // Old TUI methods - keeping for reference but not used
-    private func seekToPercent(_ percent: Int) {
-        let newPos = (Double(percent) / 100.0) * duration
-        server.seek(to: newPos)
-        needsRedraw = true
-    }
-
     // MARK: - Terminal Control
 
     private func enableRawMode() {
         var raw = termios()
         tcgetattr(STDIN_FILENO, &raw)
         oldTermios = raw
-
         raw.c_lflag &= ~(UInt(ECHO | ICANON))
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)
     }
 
     private func cleanup() {
+        isRunning = false
         showCursor()
         if var old = oldTermios {
             tcsetattr(STDIN_FILENO, TCSAFLUSH, &old)
         }
         print("\n")
+        mpvController?.quit()
         server.stop()
-    }
-
-    private func clearScreen() {
-        print("\u{001B}[2J", terminator: "")
-    }
-
-    private func moveCursor(row: Int, col: Int) {
-        print("\u{001B}[\(row);\(col)H", terminator: "")
-    }
-
-    private func hideCursor() {
-        print("\u{001B}[?25l", terminator: "")
     }
 
     private func showCursor() {
         print("\u{001B}[?25h", terminator: "")
-    }
-
-    private func clearToEnd() {
-        print("\u{001B}[J", terminator: "")
     }
 }
 

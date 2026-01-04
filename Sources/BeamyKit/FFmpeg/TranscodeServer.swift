@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// A simple HTTP server that serves transcoded media content.
@@ -20,6 +21,8 @@ public final class TranscodeServer: @unchecked Sendable {
     private var streamingQueue: DispatchQueue?
     private var isStreaming = false
     private var ptsTracker = MpegTsPtsTracker()
+    private var pendingSeekPauseAt: TimeInterval?
+    private var awaitingClientReconnect = false
 
     // Keep pipes alive at class level to prevent deallocation
     private var outputPipe: Pipe?
@@ -62,6 +65,7 @@ public final class TranscodeServer: @unchecked Sendable {
         self.input = input
         self.port = port
         self.mediaInfo = mediaInfo
+        signal(SIGPIPE, SIG_IGN)
         try startServer()
     }
 
@@ -122,6 +126,12 @@ public final class TranscodeServer: @unchecked Sendable {
     }
 
     private func handleNewConnection(_ socket: Int32) {
+        prepareForNewClient()
+
+        var noSigPipe: Int32 = 1
+        setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        log("Client connected on socket \(socket)")
+
         // Read HTTP request (just consume it)
         var buffer = [UInt8](repeating: 0, count: 4096)
         _ = recv(socket, &buffer, buffer.count, 0)
@@ -140,12 +150,32 @@ public final class TranscodeServer: @unchecked Sendable {
         // Store socket and start FFmpeg
         self.clientSocket = socket
         self.isStreaming = true
+        self.awaitingClientReconnect = false
 
         // Create dedicated queue for this streaming session
         self.streamingQueue = DispatchQueue(label: "com.beamy.streaming", qos: .userInitiated)
 
         // Start FFmpeg at current seek position
         startFFmpeg(at: currentSeekPosition)
+    }
+
+    private func prepareForNewClient() {
+        isStreaming = false
+
+        if clientSocket >= 0 {
+            log("Closing previous client socket \(clientSocket)")
+            shutdown(clientSocket, SHUT_RDWR)
+            close(clientSocket)
+            clientSocket = -1
+        }
+
+        if let process = ffmpegProcess, process.isRunning {
+            log("Terminating FFmpeg for new client")
+            process.terminate()
+            process.waitUntilExit()
+            ffmpegProcess = nil
+            log("Old FFmpeg terminated for new client")
+        }
     }
 
     /// Start FFmpeg at the given position and stream to current client socket
@@ -243,8 +273,13 @@ public final class TranscodeServer: @unchecked Sendable {
                     self?.updatePositionFromPts(latestPts)
                 }
                 let sent = data.withUnsafeBytes { send(clientSocket, $0.baseAddress, data.count, 0) }
-                if sent < 0 { break }
+                if sent < 0 {
+                    self?.log("send() failed, stopping stream")
+                    self?.isStreaming = false
+                    break
+                }
             }
+            self?.log("Streaming thread exiting, isStreaming=\(self?.isStreaming ?? false)")
         }
 
         // Parse stderr for progress (debug only; not used for currentPosition).
@@ -327,6 +362,7 @@ public final class TranscodeServer: @unchecked Sendable {
         guard !isPaused, let process = ffmpegProcess, process.isRunning else { return }
 
         isPaused = true
+        pendingSeekPauseAt = nil
         kill(process.processIdentifier, SIGSTOP)
 
         onStateChanged?(isPaused, currentPosition)
@@ -337,10 +373,21 @@ public final class TranscodeServer: @unchecked Sendable {
         guard isPaused, let process = ffmpegProcess, process.isRunning else { return }
 
         isPaused = false
+        pendingSeekPauseAt = nil
         kill(process.processIdentifier, SIGCONT)
 
         onStateChanged?(isPaused, currentPosition)
         log("Resumed at \(formatTime(currentPosition))")
+    }
+
+    private func forcePause() {
+        guard let process = ffmpegProcess, process.isRunning else { return }
+
+        isPaused = true
+        pendingSeekPauseAt = nil
+        kill(process.processIdentifier, SIGSTOP)
+        onStateChanged?(isPaused, currentPosition)
+        log("Paused at \(formatTime(currentPosition))")
     }
 
     /// Toggle between play and pause
@@ -355,8 +402,10 @@ public final class TranscodeServer: @unchecked Sendable {
     /// Seek to a new position by restarting FFmpeg
     /// The HTTP connection stays open - only FFmpeg restarts
     public func seek(to time: TimeInterval) {
-        let wasPaused = isPaused
+        seek(to: time, awaitClientReconnect: false)
+    }
 
+    public func seek(to time: TimeInterval, awaitClientReconnect: Bool) {
         log("Seeking to \(formatTime(time))...")
 
         // Update seek position for FFmpeg -ss argument
@@ -365,26 +414,29 @@ public final class TranscodeServer: @unchecked Sendable {
         // Reset currentPosition - will be updated by PTS once packets flow
         currentPosition = time
 
-        // Stop current FFmpeg
-        if let process = ffmpegProcess, process.isRunning {
-            // First resume if stopped (SIGTERM won't work on stopped process)
-            kill(process.processIdentifier, SIGCONT)
-            process.terminate()
-            process.waitUntilExit()
-            log("Old FFmpeg terminated")
-        }
-
-        // Start new FFmpeg at new position (same client socket)
-        startFFmpeg(at: time)
-
-        // Restore pause state if needed
-        if wasPaused {
-            // Small delay for FFmpeg to start, then pause
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                self?.pause()
+        if awaitClientReconnect {
+            awaitingClientReconnect = true
+            pendingSeekPauseAt = time
+            log("Awaiting client reconnect for seek")
+            prepareForNewClient()
+        } else {
+            // Stop current FFmpeg
+            if let process = ffmpegProcess, process.isRunning {
+                // First resume if stopped (SIGTERM won't work on stopped process)
+                kill(process.processIdentifier, SIGCONT)
+                process.terminate()
+                process.waitUntilExit()
+                log("Old FFmpeg terminated")
             }
+
+            // Start new FFmpeg at new position (same client socket)
+            startFFmpeg(at: time)
+            pendingSeekPauseAt = time
         }
 
+        // End seek in paused state, but wait until new PTS arrives so the
+        // receiver has a frame from the seek target before we stop.
+        isPaused = false
         onStateChanged?(isPaused, currentPosition)
     }
 
@@ -397,6 +449,10 @@ public final class TranscodeServer: @unchecked Sendable {
         currentPosition = position
         onProgress?(position)
         onStateChanged?(isPaused, position)
+
+        if let pending = pendingSeekPauseAt, position >= pending {
+            forcePause()
+        }
     }
 
     private func getLocalIPAddress() -> String {
