@@ -396,6 +396,11 @@ class TranscoderTUI: @unchecked Sendable {
             server.seek(to: time, awaitClientReconnect: true)
             // Tell mpv to reload - clears buffer, reconnects
             try? mpv.reloadStream(server.url)
+
+            // Wait for mpv to reconnect and FFmpeg to restart before pausing
+            // Otherwise pause() returns early because FFmpeg isn't running yet
+            usleep(300_000)  // 300ms - enough for reconnect + FFmpeg startup
+
             // Pause after seek so user sees the frame
             server.pause()
             try? mpv.pause()
@@ -428,6 +433,12 @@ class TranscoderTUI: @unchecked Sendable {
     }
 
     private func getIsPaused() -> Bool {
+        // During seek grace period, we know we'll end up paused (seek always pauses)
+        // Show paused state immediately to avoid icon flicker
+        if let seekTime = lastSeekTime, Date().timeIntervalSince(seekTime) < 0.5 {
+            return true
+        }
+
         if useMpv, let mpv = mpvController {
             do {
                 return try mpv.isPaused()
