@@ -71,7 +71,7 @@ struct TranscodeTest: ParsableCommand {
             if mpv {
                 try runMpvTUIMode(server: server, duration: mediaInfo.duration)
             } else {
-                try runServerTUIMode(server: server, duration: mediaInfo.duration)
+                throw ValidationError("TUI mode requires --mpv or --chromecast (ffplay fallback is no longer supported)")
             }
         } else {
             runInteractiveMode(server: server)
@@ -148,18 +148,6 @@ struct TranscodeTest: ParsableCommand {
             onCleanup: {
                 controller.quit()
             }
-        )
-        try tui.run()
-    }
-
-    private func runServerTUIMode(server: TranscodeServer, duration: TimeInterval) throws {
-        launchFFplayDetached(url: server.url)
-        let player = ServerPlayer(server: server, duration: duration)
-        let tui = TranscoderTUI(
-            server: server,
-            duration: duration,
-            player: player,
-            playerLabel: "server/ffplay"
         )
         try tui.run()
     }

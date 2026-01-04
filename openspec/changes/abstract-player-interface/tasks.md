@@ -114,10 +114,7 @@
 - **Validation**: Rapid seeks work as well or better than before refactor
 
 ### 13. Test ServerPlayer fallback mode
-- [ ] Run TUI without `--mpv` flag
-- [ ] Verify position and pause state display from server
-- [ ] Test all playback controls (pause, seek, etc.)
-- **Validation**: Fallback mode works identically to before
+- [ ] (Removed) ffplay/ServerPlayer fallback no longer supported in TUI
 
 ### 14. Add Chromecast mode to transcode-test command (if in scope)
 - [x] Add `--chromecast <device-id>` option to TranscodeTest command
