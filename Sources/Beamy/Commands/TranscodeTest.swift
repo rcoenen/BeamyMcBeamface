@@ -68,7 +68,9 @@ struct TranscodeTest: ParsableCommand {
         let controller = MpvController()
         _ = try controller.launch(url: server.url, windowTitle: "Beamy Player (mpv)")
         let player = MpvPlayer(controller: controller, server: server, streamURL: server.url)
-        let ui = TermKitTranscoderUI(player: player, duration: duration)
+        let ui = TermKitTranscoderUI(player: player, duration: duration, onCleanup: {
+            controller.quit()
+        })
         try ui.run()
     }
 
@@ -85,7 +87,9 @@ struct TranscodeTest: ParsableCommand {
         try client.launchDefaultMediaReceiver()
         try client.loadMedia(url: server.url, contentType: "video/mp2t", title: title, isLive: true)
         let player = ChromecastPlayer(client: client)
-        let ui = TermKitTranscoderUI(player: player, duration: duration)
+        let ui = TermKitTranscoderUI(player: player, duration: duration, onCleanup: {
+            try? client.disconnect()
+        })
         try ui.run()
     }
 
