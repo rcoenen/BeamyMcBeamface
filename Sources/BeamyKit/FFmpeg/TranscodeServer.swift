@@ -19,6 +19,7 @@ public final class TranscodeServer: @unchecked Sendable {
     private var clientSocket: Int32 = -1
     private var streamingQueue: DispatchQueue?
     private var isStreaming = false
+    private var ptsTracker = MpegTsPtsTracker()
 
     // Keep pipes alive at class level to prevent deallocation
     private var outputPipe: Pipe?
@@ -29,9 +30,7 @@ public final class TranscodeServer: @unchecked Sendable {
     /// Current pause state - true if FFmpeg is paused (SIGSTOP)
     public private(set) var isPaused: Bool = false
 
-    /// Current playback position from FFmpeg's out_time
-    /// This is the timestamp of frames being output, which matches what ffplay displays
-    /// (with only ~1-2s of buffer delay, not the 20s we saw with wall-clock tracking)
+    /// Current playback position derived from outgoing stream timestamps (PTS).
     public private(set) var currentPosition: TimeInterval = 0
 
     /// Callback for state changes (isPaused, currentPosition)
@@ -156,6 +155,8 @@ public final class TranscodeServer: @unchecked Sendable {
             return
         }
 
+        ptsTracker.reset(baseline: position)
+
         let config = (try? Config.load().ffmpeg) ?? .default
         let ffmpeg = Process()
         ffmpeg.executableURL = URL(fileURLWithPath: config.ffmpegPath)
@@ -228,8 +229,6 @@ public final class TranscodeServer: @unchecked Sendable {
         let clientSocket = self.clientSocket
         let outputHandle = newOutputPipe.fileHandleForReading
         let stderrHandle = newStderrPipe.fileHandleForReading
-        let onProgress = self.onProgress
-
         // Start the reading threads BEFORE FFmpeg to prevent pipe buffer deadlock
         let streamingStarted = DispatchSemaphore(value: 0)
         let stderrStarted = DispatchSemaphore(value: 0)
@@ -240,12 +239,15 @@ public final class TranscodeServer: @unchecked Sendable {
             while self?.isStreaming == true {
                 let data = outputHandle.availableData
                 if data.isEmpty { break }
+                if let latestPts = self?.ptsTracker.consume(data) {
+                    self?.updatePositionFromPts(latestPts)
+                }
                 let sent = data.withUnsafeBytes { send(clientSocket, $0.baseAddress, data.count, 0) }
                 if sent < 0 { break }
             }
         }
 
-        // Parse stderr for progress - this is the source of truth for position
+        // Parse stderr for progress (debug only; not used for currentPosition).
         Thread.detachNewThread { [weak self] in
             stderrStarted.signal()  // Signal that we're ready to read
             var textBuffer = ""
@@ -274,15 +276,6 @@ public final class TranscodeServer: @unchecked Sendable {
                            let s = Double(parts[2]) {
                             let position = h * 3600 + m * 60 + s
                             self?.log("FFmpeg out_time position: \(position)")
-
-                            // Update currentPosition - this IS the source of truth
-                            self?.currentPosition = position
-
-                            // Notify callbacks
-                            onProgress?(position)
-                            if let isPaused = self?.isPaused {
-                                self?.onStateChanged?(isPaused, position)
-                            }
                         }
                     }
 
@@ -369,7 +362,7 @@ public final class TranscodeServer: @unchecked Sendable {
         // Update seek position for FFmpeg -ss argument
         currentSeekPosition = time
 
-        // Reset currentPosition - will be updated by FFmpeg progress
+        // Reset currentPosition - will be updated by PTS once packets flow
         currentPosition = time
 
         // Stop current FFmpeg
@@ -393,6 +386,17 @@ public final class TranscodeServer: @unchecked Sendable {
         }
 
         onStateChanged?(isPaused, currentPosition)
+    }
+
+    private func updatePositionFromPts(_ position: TimeInterval) {
+        // Guard against backwards jumps from jitter; seeks reset the baseline.
+        if position + 0.5 < currentPosition {
+            return
+        }
+
+        currentPosition = position
+        onProgress?(position)
+        onStateChanged?(isPaused, position)
     }
 
     private func getLocalIPAddress() -> String {
@@ -439,6 +443,110 @@ public final class TranscodeServer: @unchecked Sendable {
 
     deinit {
         stop()
+    }
+}
+
+private final class MpegTsPtsTracker {
+    private var buffer = Data()
+    private var lastPtsSeconds: TimeInterval?
+
+    func reset(baseline: TimeInterval) {
+        buffer.removeAll(keepingCapacity: true)
+        lastPtsSeconds = baseline
+    }
+
+    func consume(_ data: Data) -> TimeInterval? {
+        buffer.append(data)
+        var latest: TimeInterval?
+
+        while buffer.count >= 188 {
+            if buffer[buffer.startIndex] != 0x47 {
+                if let syncIndex = buffer.firstIndex(of: 0x47) {
+                    buffer.removeSubrange(buffer.startIndex..<syncIndex)
+                } else {
+                    buffer.removeAll(keepingCapacity: true)
+                    break
+                }
+                if buffer.count < 188 {
+                    break
+                }
+            }
+
+            let packet = buffer.prefix(188)
+            if let pts = parsePts(from: packet) {
+                lastPtsSeconds = pts
+                latest = pts
+            }
+            buffer.removeFirst(188)
+        }
+
+        return latest
+    }
+
+    private func parsePts(from packet: Data) -> TimeInterval? {
+        guard packet.count >= 188 else { return nil }
+        if packet[packet.startIndex] != 0x47 {
+            return nil
+        }
+
+        let b1 = packet[packet.startIndex + 1]
+        let b3 = packet[packet.startIndex + 3]
+        let payloadUnitStart = (b1 & 0x40) != 0
+        let adaptationFieldControl = (b3 & 0x30) >> 4
+
+        if adaptationFieldControl == 0 || adaptationFieldControl == 2 {
+            return nil
+        }
+
+        var payloadOffset = 4
+        if adaptationFieldControl == 3 {
+            let adaptationLength = Int(packet[packet.startIndex + 4])
+            payloadOffset += 1 + adaptationLength
+            if payloadOffset >= 188 {
+                return nil
+            }
+        }
+
+        guard payloadUnitStart else { return nil }
+        if payloadOffset + 9 >= 188 {
+            return nil
+        }
+
+        if packet[packet.startIndex + payloadOffset] != 0x00 ||
+            packet[packet.startIndex + payloadOffset + 1] != 0x00 ||
+            packet[packet.startIndex + payloadOffset + 2] != 0x01 {
+            return nil
+        }
+
+        let streamId = packet[packet.startIndex + payloadOffset + 3]
+        if streamId < 0xE0 || streamId > 0xEF {
+            return nil
+        }
+
+        let ptsDtsFlags = packet[packet.startIndex + payloadOffset + 7]
+        if (ptsDtsFlags & 0x80) == 0 {
+            return nil
+        }
+
+        let ptsOffset = payloadOffset + 9
+        if ptsOffset + 4 >= 188 {
+            return nil
+        }
+
+        let p0 = packet[packet.startIndex + ptsOffset]
+        let p1 = packet[packet.startIndex + ptsOffset + 1]
+        let p2 = packet[packet.startIndex + ptsOffset + 2]
+        let p3 = packet[packet.startIndex + ptsOffset + 3]
+        let p4 = packet[packet.startIndex + ptsOffset + 4]
+
+        let pts: UInt64 =
+            (UInt64(p0 & 0x0E) << 29) |
+            (UInt64(p1) << 22) |
+            (UInt64(p2 & 0xFE) << 14) |
+            (UInt64(p3) << 7) |
+            (UInt64(p4 & 0xFE) >> 1)
+
+        return TimeInterval(pts) / 90_000.0
     }
 }
 
