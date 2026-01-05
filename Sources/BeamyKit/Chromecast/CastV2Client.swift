@@ -12,6 +12,7 @@ public final class CastV2Client: @unchecked Sendable {
     public private(set) var latestMediaStatus: MediaStatus?
     private var requestId: Int = 0
     private let verbose: Bool
+    private let logURL = URL(fileURLWithPath: "/tmp/beamy-cast.log")
 
     // Cast namespaces
     private let nsConnection = "urn:x-cast:com.google.cast.tp.connection"
@@ -25,12 +26,25 @@ public final class CastV2Client: @unchecked Sendable {
     public init(device: ChromecastDevice, verbose: Bool = true) {
         self.device = device
         self.verbose = verbose
+        if verbose {
+            // Create log file on init
+            if !FileManager.default.fileExists(atPath: logURL.path) {
+                FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            }
+        }
     }
 
     public func log(_ message: String) {
         if verbose {
             let timestamp = ISO8601DateFormatter().string(from: Date())
-            print("[\(timestamp)] \(message)")
+            let line = "[\(timestamp)] \(message)\n"
+            guard let data = line.data(using: .utf8) else { return }
+
+            if let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 import Foundation
 import BeamyKit
-import TermKit
+@preconcurrency import TermKit
 
 /// A TermKit-based UI for controlling playback via the Player abstraction.
 /// Keeps the existing CLI flags; opt-in via `--termkit` in TranscodeTest.
@@ -39,6 +39,12 @@ final class TermKitTranscoderUI {
     private var lastKnownPaused: Bool = true
     private var timer: DispatchSourceTimer?
     private var isLaunching: Bool = false
+    private let logURL = URL(fileURLWithPath: "/tmp/beamy-tui.log")
+    private weak var spinnerDialog: Dialog?
+    private var selectedChromecastName: String?
+    private var outputRadio: RadioGroup?
+    private var outputFrame: Frame?
+    private weak var chromecastButton: Button?
 
     init(
         server: TranscodeServer,
@@ -68,6 +74,11 @@ final class TermKitTranscoderUI {
     }
 
     func run() throws {
+        resetLog()
+        log("=== TermKit UI start ===")
+        let initial = selectedOutput.map { $0 == .mpv ? "mpv" : "chromecast" } ?? "none"
+        log("Initial output selection: \(initial) (config ui.defaultOutput=\(config.ui.defaultOutput ?? "nil"))")
+
         Application.prepare(driverType: .curses)
 
         let top = PlayerToplevel()
@@ -82,29 +93,64 @@ final class TermKitTranscoderUI {
 
         // Output selector container
         let outputFrame = Frame("Output")
+        self.outputFrame = outputFrame
         outputFrame.x = Pos.at(1)
         outputFrame.y = Pos.at(1)
         // Size to fit the longest label plus padding/border.
-        outputFrame.width = Dim.sized(20)
-        outputFrame.height = Dim.sized(5)
+        outputFrame.width = Dim.sized(40)
+        outputFrame.height = Dim.sized(6)
 
-        let outputRadio = RadioGroup(labels: ["_mpv", "_Chromecast"], selected: selectedOutput?.rawValue, orientation: .vertical)
-        outputRadio.x = Pos.at(1)
-        outputRadio.y = Pos.at(1)
-        outputRadio.selectionChanged = { [weak self] _, _, newSelection in
-            guard let self else { return }
-            if let choice = newSelection.flatMap(OutputChoice.init(rawValue:)) {
-                self.selectedOutput = choice
-                // Stop current player when switching outputs; new player starts on next Play.
-                self.cleanupCurrentPlayer()
-                self.persistDefaultOutput(choice)
+        let chromecastLabelText: String
+        if let saved = config.chromecast.defaultDevice {
+            chromecastLabelText = "_Chromecast (\(saved))"
+            selectedChromecastName = saved
+        } else {
+            chromecastLabelText = "_Chromecast (none)"
+            // If Chromecast was selected but there's no device, force to mpv
+            if selectedOutput == .chromecast {
+                log("No Chromecast device configured - forcing output to mpv")
+                selectedOutput = .mpv
             }
         }
-        outputFrame.addSubview(outputRadio)
+
+        let initialRadio = RadioGroup(labels: ["_mpv", chromecastLabelText], selected: selectedOutput?.rawValue, orientation: .vertical)
+        initialRadio.x = Pos.at(1)
+        initialRadio.y = Pos.at(1)
+        outputFrame.addSubview(initialRadio)
+        self.outputRadio = initialRadio
+
+        let chromecastButton = Button("Select Chromecast…")
+        chromecastButton.x = Pos.at(1)
+        chromecastButton.y = Pos.bottom(of: outputFrame) + 1
+        chromecastButton.width = Dim.sized(24)
+        chromecastButton.colorScheme = makeScheme(
+            normalFore: .black, normalBack: .brightCyan,
+            focusFore: .black, focusBack: .white
+        )
+        chromecastButton.canFocus = true
+        self.chromecastButton = chromecastButton
 
         let statusLabel = Label("Status: idle (choose output, press Play)")
         statusLabel.x = Pos.at(1)
-        statusLabel.y = Pos.bottom(of: outputFrame) + 1
+        statusLabel.y = Pos.bottom(of: chromecastButton) + 1
+
+        chromecastButton.clicked = { [weak self, weak statusLabel] _ in
+            guard let self else { return }
+            self.applyOutputChoice(.chromecast, statusLabel: statusLabel, forcePicker: true)
+        }
+
+        initialRadio.selectionChanged = { [weak self, weak statusLabel, weak initialRadio] _, _, newSelection in
+            guard let self, let choice = newSelection.flatMap(OutputChoice.init(rawValue:)) else { return }
+            // If user tries to select Chromecast but there's no device, revert to mpv
+            if choice == .chromecast && self.selectedChromecastName == nil {
+                self.log("Cannot select Chromecast (none) - reverting to mpv")
+                initialRadio?.selected = OutputChoice.mpv.rawValue
+                self.selectedOutput = .mpv
+                statusLabel?.text = "Status: no Chromecast device selected (press Select Chromecast... button)"
+                return
+            }
+            self.applyOutputChoice(choice, statusLabel: statusLabel)
+        }
 
         let timeLabel = Label("Time: --:--:-- / \(formatTime(duration))")
         timeLabel.x = Pos.at(1)
@@ -123,7 +169,7 @@ final class TermKitTranscoderUI {
         playPauseButton.x = Pos.at(1)
         playPauseButton.y = Pos.bottom(of: barLabel) + 1
         playPauseButton.width = Dim.sized(14)
-        playPauseButton.isDefault = true
+        playPauseButton.isDefault = false
         playPauseButton.colorScheme = makeScheme(
             normalFore: .black, normalBack: .brightGreen,
             focusFore: .black, focusBack: .white
@@ -199,6 +245,7 @@ final class TermKitTranscoderUI {
         }
 
         window.addSubview(outputFrame)
+        window.addSubview(chromecastButton)
         window.addSubview(statusLabel)
         window.addSubview(timeLabel)
         window.addSubview(percentLabel)
@@ -210,7 +257,7 @@ final class TermKitTranscoderUI {
         window.addSubview(jumpLabel)
         window.addSubview(jumpField)
         window.addSubview(jumpButton)
-        let shortcutsLabel = Label("Keys: Space=Play/Pause  [=Seek -10s  ]=Seek +10s  J=Jump  Q=Quit")
+        let shortcutsLabel = Label("Keys: J=Jump  Q=Quit")
         shortcutsLabel.x = Pos.at(1)
         shortcutsLabel.y = Pos.bottom(of: jumpField) + 1
         window.addSubview(shortcutsLabel)
@@ -218,26 +265,9 @@ final class TermKitTranscoderUI {
         top.addSubview(window)
         Application.top.addSubview(top)
 
-        top.handleKey = { [weak self, weak outputRadio, weak jumpField, weak statusLabel] event in
+        top.handleKey = { [weak self, weak jumpField, weak statusLabel] event in
             guard let self = self else { return false }
-            // Let the radio group handle its own keys when focused (space/enter), but still allow global shortcuts.
-            if outputRadio?.hasFocus == true {
-                if case .letter(let ch) = event.key {
-                    switch ch {
-                    case "q", "Q":
-                        self.cleanupCurrentPlayer()
-                        self.onCleanup?()
-                        Application.requestStop()
-                        return true
-                    case "j", "J":
-                        self.focusAndJump(jumpField: jumpField, statusLabel: statusLabel)
-                        return true
-                    default:
-                        break
-                    }
-                }
-                return false
-            }
+            // Only handle global shortcuts (J, Q) - let TermKit handle all navigation (UP/DOWN/TAB)
             switch event.key {
             case .letter(let ch):
                 switch ch {
@@ -248,15 +278,6 @@ final class TermKitTranscoderUI {
                     return true
                 case "j", "J":
                     self.focusAndJump(jumpField: jumpField, statusLabel: statusLabel)
-                    return true
-                case " ":
-                    self.handlePlayPause(statusLabel: statusLabel)
-                    return true
-                case "[":
-                    self.scrub(by: -10, statusLabel: statusLabel)
-                    return true
-                case "]":
-                    self.scrub(by: 10, statusLabel: statusLabel)
                     return true
                 default:
                     return false
@@ -332,7 +353,7 @@ final class TermKitTranscoderUI {
         }
     }
 
-    private func ensurePlayerAvailable(statusLabel: Label?, completion: @escaping (Bool) -> Void) {
+    private func ensurePlayerAvailable(statusLabel: Label?, completion: @escaping @Sendable (Bool) -> Void) {
         if isLaunching {
             statusLabel?.text = "Status: launching..."
             completion(false)
@@ -368,7 +389,8 @@ final class TermKitTranscoderUI {
             }
             isLaunching = false
         case .chromecast:
-            resolveChromecastDevice(statusLabel: statusLabel) { device in
+            resolveChromecastDevice(statusLabel: statusLabel) { [weak self, weak statusLabel] device in
+                guard let self else { return }
                 self.isLaunching = false
                 guard let device else {
                     completion(false)
@@ -382,6 +404,8 @@ final class TermKitTranscoderUI {
                     self.config.chromecast.defaultDevice = device.name
                     try? self.config.save()
                     self.persistDefaultOutput(.chromecast)
+                    self.selectedChromecastName = device.name
+                    statusLabel?.text = "Status: Chromecast set to \(device.name)"
                     completion(true)
                 } catch {
                     statusLabel?.text = "Status: Chromecast error \(error)"
@@ -394,6 +418,7 @@ final class TermKitTranscoderUI {
     }
 
     private func launchMpv() throws -> PlayerHandle {
+        log("Launching mpv at \(server.url.absoluteString)")
         let controller = MpvController()
         _ = try controller.launch(url: server.url, windowTitle: "Beamy Player (mpv)")
         let player = MpvPlayer(controller: controller, server: server, streamURL: server.url)
@@ -409,6 +434,7 @@ final class TermKitTranscoderUI {
     }
 
     private func launchChromecast(to device: ChromecastDevice) throws -> PlayerHandle {
+        log("Launching Chromecast to \(device.name) addr=\(device.address):\(device.port) model=\(device.model ?? "unknown") type=\(device.castType.rawValue)")
         let client = CastV2Client(device: device, verbose: true)
         try client.connect()
         try client.launchDefaultMediaReceiver()
@@ -425,69 +451,227 @@ final class TermKitTranscoderUI {
         })
     }
 
-    private func resolveChromecastDevice(statusLabel: Label?, completion: @escaping (ChromecastDevice?) -> Void) {
+    private func resolveChromecastDevice(statusLabel: Label?, completion: @escaping @Sendable (ChromecastDevice?) -> Void) {
         let timeout = config.chromecast.discoveryTimeout
         if let preferred = config.chromecast.defaultDevice {
             statusLabel?.text = "Status: checking Chromecast \(preferred)..."
+            log("Resolving preferred Chromecast from config: \(preferred) with timeout \(timeout)s")
             let device = try? ChromecastDiscovery.findDevice(named: preferred, timeout: timeout)
             if let device {
+                log("Preferred Chromecast found: \(device.name) model=\(device.model ?? "unknown") type=\(device.castType.rawValue)")
                 completion(device)
             } else {
+                log("Preferred Chromecast \(preferred) not found; falling back to discovery dialog")
                 presentDiscovery(statusLabel: statusLabel, timeout: timeout, completion: completion)
             }
         } else {
+            log("No preferred Chromecast set; starting discovery dialog")
             presentDiscovery(statusLabel: statusLabel, timeout: timeout, completion: completion)
         }
     }
 
-    private func presentDiscovery(statusLabel: Label?, timeout: Double, completion: @escaping (ChromecastDevice?) -> Void) {
-        statusLabel?.text = "Status: discovering Chromecast devices..."
-        let devices = (try? ChromecastDiscovery.discover(timeout: timeout)) ?? []
-        if devices.isEmpty {
-            statusLabel?.text = "Status: no Chromecast devices found"
-            completion(nil)
-            return
+    private func validateConfiguredDevice(against devices: [ChromecastDevice]) {
+        guard let configured = selectedChromecastName else { return }
+
+        // Check if configured device exists in discovered devices
+        let exists = devices.contains(where: { $0.name == configured })
+
+        if !exists {
+            log("Configured device '\(configured)' not found in discovery - clearing configuration")
+            // Clear configuration across all three representations
+            selectedChromecastName = nil
+            config.chromecast.defaultDevice = nil
+            try? config.save()
+            rebuildOutputRadio(chromecastName: nil, selected: outputRadio?.selected, statusLabel: nil)
         }
-        showDiscoveryDialog(devices: devices, completion: completion)
     }
 
-    private func showDiscoveryDialog(devices: [ChromecastDevice], completion: @escaping (ChromecastDevice?) -> Void) {
-        let width = min(max(50, devices.map { $0.name.count }.max() ?? 0 + 10), 80)
-        let height = min(max(8, devices.count + 4), 20)
+    private func presentDiscovery(statusLabel: Label?, timeout: Double, completion: @escaping @Sendable (ChromecastDevice?) -> Void) {
+        showSpinner(message: "Scanning for Chromecasts…")
+        statusLabel?.text = "Status: discovering Chromecast devices..."
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak statusLabel, completion] in
+            guard let self else { return }
+            let devices = (try? ChromecastDiscovery.discover(timeout: timeout)) ?? []
+            self.log("Chromecast discovery complete (\(devices.count) total):")
+            for device in devices {
+                self.log("  - \(device.name) model=\(device.model ?? "unknown") type=\(device.castType.rawValue) addr=\(device.address):\(device.port)")
+            }
+            let videoDevices = devices.filter { $0.isVideoCapable }
+
+            DispatchQueue.main.async {
+                self.hideSpinner()
+
+                // Validate configured device against discovered devices
+                self.validateConfiguredDevice(against: videoDevices)
+
+                if videoDevices.isEmpty {
+                    statusLabel?.text = "Status: no video-capable Chromecasts found"
+                    self.log("Chromecast discovery: 0 video-capable (found \(devices.count) total)")
+                    completion(nil)
+                    return
+                }
+                let names = videoDevices.map { "\($0.name) (\($0.model ?? "unknown"))" }.joined(separator: ", ")
+                self.log("Chromecast discovery: \(videoDevices.count) video-capable -> [\(names)]")
+                statusLabel?.text = "Status: found \(videoDevices.count) video-capable Chromecast(s)"
+                self.showDiscoveryDialog(devices: videoDevices, timeout: timeout, statusLabel: statusLabel, completion: completion)
+            }
+        }
+    }
+
+    private func showSpinner(message: String) {
+        // Dismiss any existing spinner.
+        hideSpinner()
+        let dialog = Dialog(title: "", width: 40, height: 5, buttons: [])
+        dialog.modal = false
+        dialog.closeClicked = nil
+
+        let spinner = Spinner()
+        spinner.x = Pos.at(1)
+        spinner.y = Pos.at(1)
+        dialog.addSubview(spinner)
+
+        let label = Label(message)
+        label.x = Pos.right(of: spinner) + 1
+        label.y = spinner.y
+        dialog.addSubview(label)
+
+        spinner.start()
+        spinnerDialog = dialog
+        toplevel?.addSubview(dialog)
+    }
+
+    private func hideSpinner() {
+        guard let dialog = spinnerDialog else { return }
+        dialog.superview?.removeSubview(dialog)
+        spinnerDialog = nil
+    }
+
+    private func showDiscoveryDialog(
+        devices: [ChromecastDevice],
+        timeout: Double,
+        statusLabel: Label?,
+        completion: @escaping @Sendable (ChromecastDevice?) -> Void
+    ) {
+        var currentDevices = devices
+        log("Opening Chromecast dialog with \(currentDevices.count) video devices")
+        let width = min(max(50, currentDevices.map { $0.name.count }.max() ?? 0 + 10), 80)
+        let listHeight = min(10, max(3, currentDevices.count))
+        let height = min(25, listHeight + 5) // list rows + buttons/title padding
         let dialog = Dialog(title: "Select Chromecast", width: width, height: height, buttons: [])
         dialog.modal = true
-        dialog.closedCallback = {
+        dialog.closeClicked = nil
+        dialog.closedCallback = { [weak self] in
+            self?.log("Chromecast dialog closed without selection")
             completion(nil)
         }
 
-        let list = ListView(items: devices.map { $0.name })
+        // Build options: include "None" to disable Chromecast.
+        func buildLabels() -> ([ChromecastDevice?], [String], Int) {
+            var options: [ChromecastDevice?] = [nil]
+            options.append(contentsOf: currentDevices)
+            let labels: [String] = options.map { device in
+                if let device {
+                    // Checkmark shows CONFIGURED device, not currently playing device
+                    let isActive = (device.name == self.selectedChromecastName)
+                    let prefix = isActive ? "✓ " : "  "
+                    return "\(prefix)📺 \(device.name)"
+                } else {
+                    // "None" is checked when no device is configured
+                    let isActive = (self.selectedChromecastName == nil)
+                    let prefix = isActive ? "✓ " : "  "
+                    return "\(prefix)🚫 None (disable Chromecast)"
+                }
+            }
+            // Default selection: active item if present, else first.
+            let activeIndex = labels.firstIndex(where: { $0.hasPrefix("✓") }) ?? 0
+            return (options, labels, activeIndex)
+        }
+
+        var (options, labels, activeIndex) = buildLabels()
+
+        let list = ListView(items: labels)
         list.allowMarking = false
         list.allowsMultipleSelection = false
-        list.selectedItem = 0
+        list.selectedItem = activeIndex
+        list.selectedMarker = ">"
         list.x = Pos.at(1)
         list.y = Pos.at(1)
         list.width = Dim.fill(1)
-        list.height = Dim.fill(3)
+        list.height = Dim.sized(listHeight)
+        list.autoNavigateToNextViewOnBoundary = true
         dialog.addSubview(list)
 
         let ok = Button("OK")
-        ok.clicked = { _ in
+        ok.isDefault = true
+        ok.clicked = { [weak self] _ in
+            guard let self else { return }
             let idx = list.selectedItem
-            let device = idx < devices.count ? devices[idx] : devices.first
+            let deviceOpt = idx < options.count ? options[idx] : nil
             Application.requestStop()
-            completion(device)
+            if let device = deviceOpt {
+                completion(device)
+                self.log("Chromecast dialog selection: \(device.name) model=\(device.model ?? "unknown") type=\(device.castType.rawValue)")
+            } else {
+                // None selected: disable Chromecast output and switch to mpv.
+                self.disableChromecast(statusLabel: statusLabel)
+                completion(nil)
+                self.log("Chromecast dialog selection: None (disable Chromecast)")
+            }
         }
 
         let cancel = Button("Cancel")
-        cancel.clicked = { _ in
+        cancel.clicked = { [weak self] _ in
             Application.requestStop()
             completion(nil)
+            self?.log("Chromecast dialog cancelled")
+        }
+
+        let reload = Button("Reload")
+        reload.clicked = { [weak self] _ in
+            guard let self else { return }
+            let discovered = (try? ChromecastDiscovery.discover(timeout: timeout)) ?? []
+            self.log("Reload discovery results (\(discovered.count) total):")
+            for device in discovered {
+                self.log("  - \(device.name) model=\(device.model ?? "unknown") type=\(device.castType.rawValue) addr=\(device.address):\(device.port)")
+            }
+            let videos = discovered.filter { $0.isVideoCapable }
+            if videos.isEmpty {
+                statusLabel?.text = "Status: no video-capable Chromecasts found (reload)"
+                self.log("Reload: 0 video-capable (found \(discovered.count) total)")
+            } else {
+                currentDevices = videos
+                let built = buildLabels()
+                options = built.0
+                list.items = built.1
+                list.selectedItem = built.2
+                statusLabel?.text = "Status: found \(videos.count) video-capable Chromecast(s)"
+                let names = videos.map { "\($0.name) (\($0.model ?? "unknown"))" }.joined(separator: ", ")
+                self.log("Reload: \(videos.count) video-capable -> [\(names)]")
+            }
         }
 
         dialog.addButton(ok)
         dialog.addButton(cancel)
+        dialog.addButton(reload)
 
         Application.present(top: dialog)
+    }
+
+    private func disableChromecast(statusLabel: Label?) {
+        // ONLY called when user explicitly selects "None" in discovery modal
+        // This is the ONLY place (besides validation) where clearing selectedChromecastName is correct
+        selectedOutput = .mpv
+        outputRadio?.selected = OutputChoice.mpv.rawValue
+        selectedChromecastName = nil  // Intentional: user chose "None"
+        config.chromecast.defaultDevice = nil
+        try? config.save()
+        rebuildOutputRadio(chromecastName: nil, selected: OutputChoice.mpv.rawValue, statusLabel: statusLabel)
+        persistDefaultOutput(.mpv)
+        cleanupCurrentPlayer()
+        statusLabel?.text = "Status: Chromecast disabled (mpv active)"
+        if let radio = outputRadio {
+            toplevel?.setFocus(radio)
+        }
     }
 
     private func persistDefaultOutput(_ choice: OutputChoice) {
@@ -527,6 +711,25 @@ final class TermKitTranscoderUI {
             statusLabel?.text = "Status: jump to \(formatTime(clamped))"
         } catch {
             statusLabel?.text = "Status: jump error \(error)"
+        }
+    }
+
+    private func resetLog() {
+        try? FileManager.default.removeItem(at: logURL)
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+    }
+
+    private func log(_ message: String) {
+        let line = "[TUI] \(message)"
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: data)
+            return
+        }
+        if let handle = try? FileHandle(forWritingTo: logURL) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
         }
     }
 
@@ -582,6 +785,90 @@ final class TermKitTranscoderUI {
         let empty = String(repeating: "-", count: emptyCount)
         let bar = "\(filled)|\(empty)"
         return "\(prefix) [\(bar)] \(suffix)"
+    }
+
+    private func rebuildOutputRadio(chromecastName: String?, selected: Int?, statusLabel: Label? = nil) {
+        guard let frame = outputFrame else { return }
+        if let radio = outputRadio {
+            radio.superview?.removeSubview(radio)
+        }
+        let chromecastLabel = chromecastName.map { "_Chromecast (\($0))" } ?? "_Chromecast (none)"
+        let labels = ["_mpv", chromecastLabel]
+        let maxLen = labels.map { $0.count }.max() ?? 4
+        let desiredWidth = max(40, maxLen + 6)
+        frame.width = Dim.sized(min(desiredWidth, 70))
+        let newRadio = RadioGroup(labels: labels, selected: selected, orientation: .vertical)
+        newRadio.x = Pos.at(1)
+        newRadio.y = Pos.at(1)
+        frame.addSubview(newRadio)
+        // Reattach handler
+        newRadio.selectionChanged = { [weak self] _, _, newSelection in
+            guard let self, let newSelection, let choice = OutputChoice(rawValue: newSelection) else { return }
+            // If user tries to select Chromecast but there's no device, revert to mpv
+            if choice == .chromecast && chromecastName == nil {
+                self.log("Cannot select Chromecast (none) - reverting to mpv")
+                newRadio.selected = OutputChoice.mpv.rawValue
+                self.selectedOutput = .mpv
+                statusLabel?.text = "Status: no Chromecast device selected (press Select Chromecast... button)"
+                return
+            }
+            self.applyOutputChoice(choice, statusLabel: statusLabel)
+        }
+        outputRadio = newRadio
+    }
+
+    private func applyOutputChoice(_ choice: OutputChoice, statusLabel: Label?, forcePicker: Bool = false) {
+        switch choice {
+        case .chromecast:
+            if let button = chromecastButton {
+                toplevel?.setFocus(button)
+            }
+            let previousChoice = selectedOutput
+            log("Output selection changed to Chromecast; starting discovery dialog")
+            // If we already have a device and not forcing a picker, just select it.
+            if !forcePicker, let existing = selectedChromecastName {
+                selectedOutput = .chromecast
+                outputRadio?.selected = OutputChoice.chromecast.rawValue
+                statusLabel?.text = "Status: Chromecast set to \(existing)"
+                return
+            }
+            presentDiscovery(statusLabel: statusLabel, timeout: config.chromecast.discoveryTimeout) { [weak self, weak statusLabel] device in
+                guard let self else { return }
+                if let device {
+                    self.selectedOutput = .chromecast
+                    self.outputRadio?.selected = OutputChoice.chromecast.rawValue
+                    self.cleanupCurrentPlayer()
+                    self.config.chromecast.defaultDevice = device.name
+                    try? self.config.save()
+                    self.persistDefaultOutput(.chromecast)
+                    statusLabel?.text = "Status: Chromecast set to \(device.name)"
+                    self.selectedChromecastName = device.name
+                    self.rebuildOutputRadio(chromecastName: device.name, selected: OutputChoice.chromecast.rawValue, statusLabel: statusLabel)
+                    self.log("Chromecast selected: \(device.name) model=\(device.model ?? "unknown") type=\(device.castType.rawValue)")
+                } else {
+                    // User cancelled or no devices found - preserve configuration!
+                    // Do not silently fall back; keep prior output selection.
+                    if let prev = previousChoice {
+                        self.outputRadio?.selected = prev.rawValue
+                        self.selectedOutput = prev
+                    }
+                    statusLabel?.text = "Status: Chromecast selection cancelled or no devices found"
+                    // IMPORTANT: Do NOT clear selectedChromecastName here!
+                    // User cancelling discovery should preserve their previous config
+                    // Radio label stays as-is (e.g., "Chromecast (Bedroom TV)")
+                    self.log("Chromecast selection cancelled or no video-capable devices (config preserved)")
+                }
+            }
+        case .mpv:
+            log("Output selection changed to mpv (preserving Chromecast config: \(selectedChromecastName ?? "none"))")
+            selectedOutput = .mpv
+            outputRadio?.selected = OutputChoice.mpv.rawValue
+            cleanupCurrentPlayer()
+            persistDefaultOutput(.mpv)
+            // IMPORTANT: Do NOT clear selectedChromecastName - preserve config!
+            // Radio label should still show configured device even when playing via mpv
+            rebuildOutputRadio(chromecastName: selectedChromecastName, selected: OutputChoice.mpv.rawValue, statusLabel: statusLabel)
+        }
     }
 
     private func makeScheme(normalFore: Color, normalBack: Color, focusFore: Color, focusBack: Color) -> ColorScheme {

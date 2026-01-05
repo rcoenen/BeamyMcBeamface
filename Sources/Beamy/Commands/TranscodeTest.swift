@@ -17,6 +17,7 @@ struct TranscodeTest: ParsableCommand {
     func run() throws {
         // Clear old logs
         try? FileManager.default.removeItem(atPath: "/tmp/beamy-tui.log")
+        try? FileManager.default.removeItem(atPath: "/tmp/beamy-cast.log")
         try? FileManager.default.removeItem(atPath: "/tmp/beamy-transcoder-debug.log")
 
         let inputURL = URL(fileURLWithPath: inputFile)
@@ -25,24 +26,32 @@ struct TranscodeTest: ParsableCommand {
             throw ValidationError("File not found: \(inputFile)")
         }
 
-        print("=== TRANSCODE TEST ===")
-        print("Input: \(inputURL.lastPathComponent)")
-        print("Port: \(port)")
-        print("")
+        // Log to file instead of stdout (terminal is the UI)
+        let logURL = URL(fileURLWithPath: "/tmp/beamy-tui.log")
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
 
-        print("Getting media info...")
+        func log(_ message: String) {
+            let line = "[INIT] \(message)\n"
+            guard let data = line.data(using: .utf8) else { return }
+            if let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            }
+        }
+
+        log("=== TRANSCODE TEST ===")
+        log("Input: \(inputURL.lastPathComponent)")
+        log("Port: \(port)")
+
+        log("Getting media info...")
         let mediaInfo = try FFmpeg.getMediaInfo(file: inputURL)
-        print("Duration: \(formatTime(mediaInfo.duration))")
-        print("")
+        log("Duration: \(formatTime(mediaInfo.duration))")
 
-        print("Starting transcoder server...")
+        log("Starting transcoder server...")
         let server = try TranscodeServer(input: inputURL, port: port, mediaInfo: mediaInfo)
 
-        print("")
-        print("========================================")
-        print("Stream ready at: \(server.url)")
-        print("========================================")
-        print("")
+        log("Stream ready at: \(server.url)")
 
         let config = try Config.load()
 
