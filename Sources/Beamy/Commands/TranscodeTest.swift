@@ -14,12 +14,6 @@ struct TranscodeTest: ParsableCommand {
     @Option(name: .shortAndLong, help: "Port for HTTP server")
     var port: Int = 8080
 
-    @Flag(help: "Use mpv with IPC for playback")
-    var mpv: Bool = false
-
-    @Option(name: .long, help: "Chromecast device name or IP for playback")
-    var chromecast: String?
-
     func run() throws {
         // Clear old logs
         try? FileManager.default.removeItem(atPath: "/tmp/beamy-tui.log")
@@ -50,54 +44,17 @@ struct TranscodeTest: ParsableCommand {
         print("========================================")
         print("")
 
-        if let chromecast = chromecast {
-            try runChromecastMode(
-                server: server,
-                duration: mediaInfo.duration,
-                deviceNameOrIP: chromecast,
-                title: inputURL.deletingPathExtension().lastPathComponent
-            )
-        } else if mpv {
-            try runMpvMode(server: server, duration: mediaInfo.duration)
-        } else {
-            throw ValidationError("Select a player: --mpv or --chromecast <device>")
-        }
-    }
+        let config = try Config.load()
 
-    private func runMpvMode(server: TranscodeServer, duration: TimeInterval) throws {
-        let controller = MpvController()
-        _ = try controller.launch(url: server.url, windowTitle: "Beamy Player (mpv)")
-        let player = MpvPlayer(controller: controller, server: server, streamURL: server.url)
-        let ui = TermKitTranscoderUI(player: player, duration: duration, onCleanup: {
-            controller.quit()
-        })
+        let ui = TermKitTranscoderUI(
+            server: server,
+            duration: mediaInfo.duration,
+            title: inputURL.deletingPathExtension().lastPathComponent,
+            config: config,
+            initialOutput: nil,
+            onCleanup: nil
+        )
         try ui.run()
-    }
-
-    private func runChromecastMode(
-        server: TranscodeServer,
-        duration: TimeInterval,
-        deviceNameOrIP: String,
-        title: String
-    ) throws {
-        let device = try resolveDevice(nameOrIP: deviceNameOrIP)
-        print("Connecting to Chromecast: \(device.name)...")
-        let client = CastV2Client(device: device, verbose: true)
-        try client.connect()
-        try client.launchDefaultMediaReceiver()
-        try client.loadMedia(url: server.url, contentType: "video/mp2t", title: title, isLive: true)
-        let player = ChromecastPlayer(client: client)
-        let ui = TermKitTranscoderUI(player: player, duration: duration, onCleanup: {
-            try? client.disconnect()
-        })
-        try ui.run()
-    }
-
-    private func resolveDevice(nameOrIP: String) throws -> ChromecastDevice {
-        if let device = try ChromecastDiscovery.findDevice(named: nameOrIP, timeout: 5.0) {
-            return device
-        }
-        throw ValidationError("Chromecast device not found: \(nameOrIP)")
     }
 
     private func formatTime(_ seconds: TimeInterval) -> String {

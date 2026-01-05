@@ -16,17 +16,54 @@ private final class PlayerToplevel: Toplevel {
 }
 
 final class TermKitTranscoderUI {
-    private let player: Player
+    enum OutputChoice: Int {
+        case mpv = 0
+        case chromecast = 1
+    }
+
+    private struct PlayerHandle {
+        let output: OutputChoice
+        let player: Player
+        let cleanup: () -> Void
+    }
+
+    private let server: TranscodeServer
     private let duration: TimeInterval
+    private let title: String
+    private var config: Config
+    private var selectedOutput: OutputChoice?
     private let onCleanup: (() -> Void)?
     private weak var toplevel: Toplevel?
+    private var playerHandle: PlayerHandle?
     private var lastKnownPosition: TimeInterval = 0
-    private var lastKnownPaused: Bool = false
+    private var lastKnownPaused: Bool = true
     private var timer: DispatchSourceTimer?
+    private var isLaunching: Bool = false
 
-    init(player: Player, duration: TimeInterval, onCleanup: (() -> Void)? = nil) {
-        self.player = player
+    init(
+        server: TranscodeServer,
+        duration: TimeInterval,
+        title: String,
+        config: Config,
+        initialOutput: OutputChoice? = nil,
+        onCleanup: (() -> Void)? = nil
+    ) {
+        self.server = server
         self.duration = duration
+        self.title = title
+        self.config = config
+        // Choose initial selection: explicit override > config.ui.defaultOutput > none
+        if let initialOutput {
+            self.selectedOutput = initialOutput
+        } else if let saved = config.ui.defaultOutput?.lowercased() {
+            switch saved {
+            case "mpv": self.selectedOutput = .mpv
+            case "chromecast": self.selectedOutput = .chromecast
+            default: self.selectedOutput = nil
+            }
+        } else {
+            self.selectedOutput = nil
+        }
         self.onCleanup = onCleanup
     }
 
@@ -43,9 +80,31 @@ final class TermKitTranscoderUI {
         window.width = Dim.fill()
         window.height = Dim.fill()
 
-        let statusLabel = Label("Status: connecting...")
+        // Output selector container
+        let outputFrame = Frame("Output")
+        outputFrame.x = Pos.at(1)
+        outputFrame.y = Pos.at(1)
+        // Size to fit the longest label plus padding/border.
+        outputFrame.width = Dim.sized(20)
+        outputFrame.height = Dim.sized(5)
+
+        let outputRadio = RadioGroup(labels: ["_mpv", "_Chromecast"], selected: selectedOutput?.rawValue, orientation: .vertical)
+        outputRadio.x = Pos.at(1)
+        outputRadio.y = Pos.at(1)
+        outputRadio.selectionChanged = { [weak self] _, _, newSelection in
+            guard let self else { return }
+            if let choice = newSelection.flatMap(OutputChoice.init(rawValue:)) {
+                self.selectedOutput = choice
+                // Stop current player when switching outputs; new player starts on next Play.
+                self.cleanupCurrentPlayer()
+                self.persistDefaultOutput(choice)
+            }
+        }
+        outputFrame.addSubview(outputRadio)
+
+        let statusLabel = Label("Status: idle (choose output, press Play)")
         statusLabel.x = Pos.at(1)
-        statusLabel.y = Pos.at(1)
+        statusLabel.y = Pos.bottom(of: outputFrame) + 1
 
         let timeLabel = Label("Time: --:--:-- / \(formatTime(duration))")
         timeLabel.x = Pos.at(1)
@@ -60,64 +119,53 @@ final class TermKitTranscoderUI {
         barLabel.y = Pos.bottom(of: percentLabel) + 1
         barLabel.width = Dim.fill() - Dim.sized(2)
 
-        let playPauseButton = Button("Pause/Resume")
+        let playPauseButton = Button("Play/Pause")
         playPauseButton.x = Pos.at(1)
         playPauseButton.y = Pos.bottom(of: barLabel) + 1
-        playPauseButton.width = Dim.sized(16)
+        playPauseButton.width = Dim.sized(14)
         playPauseButton.isDefault = true
+        playPauseButton.colorScheme = makeScheme(
+            normalFore: .black, normalBack: .brightGreen,
+            focusFore: .black, focusBack: .white
+        )
         playPauseButton.clicked = { [weak self, weak statusLabel] _ in
-            guard let self = self else { return }
-            do {
-                let paused = (try? self.player.isPaused()) ?? self.lastKnownPaused
-                if paused {
-                    try self.player.resume()
-                    self.lastKnownPaused = false
-                    statusLabel?.text = "Status: playing"
-                } else {
-                    try self.player.pause()
-                    self.lastKnownPaused = true
-                    statusLabel?.text = "Status: paused"
-                }
-            } catch {
-                statusLabel?.text = "Status: error \(error)"
-            }
+            self?.handlePlayPause(statusLabel: statusLabel)
         }
 
         let seekBackButton = Button("⟵ 10s")
         seekBackButton.x = Pos.right(of: playPauseButton) + 2
         seekBackButton.y = playPauseButton.y
         seekBackButton.width = Dim.sized(10)
+        seekBackButton.colorScheme = makeScheme(
+            normalFore: .black, normalBack: .brightCyan,
+            focusFore: .black, focusBack: .white
+        )
         seekBackButton.clicked = { [weak self, weak statusLabel] _ in
-            guard let self = self else { return }
-            let target = max(0, self.lastKnownPosition - 10)
-            do {
-                try self.player.seek(to: target)
-                statusLabel?.text = "Status: seek to \(self.formatTime(target))"
-            } catch {
-                statusLabel?.text = "Status: seek error \(error)"
-            }
+            self?.scrub(by: -10, statusLabel: statusLabel)
         }
 
         let seekForwardButton = Button("10s ⟶")
         seekForwardButton.x = Pos.right(of: seekBackButton) + 2
         seekForwardButton.y = playPauseButton.y
         seekForwardButton.width = Dim.sized(10)
+        seekForwardButton.colorScheme = makeScheme(
+            normalFore: .black, normalBack: .brightCyan,
+            focusFore: .black, focusBack: .white
+        )
         seekForwardButton.clicked = { [weak self, weak statusLabel] _ in
-            guard let self = self else { return }
-            let target = min(self.duration, self.lastKnownPosition + 10)
-            do {
-                try self.player.seek(to: target)
-                statusLabel?.text = "Status: seek to \(self.formatTime(target))"
-            } catch {
-                statusLabel?.text = "Status: seek error \(error)"
-            }
+            self?.scrub(by: 10, statusLabel: statusLabel)
         }
 
         let quitButton = Button("Quit")
         quitButton.x = Pos.right(of: seekForwardButton) + 2
         quitButton.y = playPauseButton.y
         quitButton.width = Dim.sized(8)
+        quitButton.colorScheme = makeScheme(
+            normalFore: .white, normalBack: .red,
+            focusFore: .white, focusBack: .brightMagenta
+        )
         quitButton.clicked = { [weak self] _ in
+            self?.cleanupCurrentPlayer()
             self?.onCleanup?()
             Application.requestStop()
         }
@@ -129,12 +177,17 @@ final class TermKitTranscoderUI {
         let jumpField = TextField("")
         jumpField.x = Pos.right(of: jumpLabel) + 1
         jumpField.y = jumpLabel.y
-        jumpField.width = Dim.fill() - Dim.sized(30)
+        // Compact entry (seconds or hh:mm:ss). Narrow to avoid huge bar.
+        jumpField.width = Dim.sized(10)
 
         let jumpButton = Button("Jump")
         jumpButton.x = Pos.right(of: jumpField) + 1
         jumpButton.y = jumpLabel.y
         jumpButton.width = Dim.sized(8)
+        jumpButton.colorScheme = makeScheme(
+            normalFore: .black, normalBack: .brightGreen,
+            focusFore: .black, focusBack: .white
+        )
         jumpButton.clicked = { [weak self, weak statusLabel, weak jumpField] _ in
             guard let self = self else { return }
             let text = jumpField?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -142,15 +195,10 @@ final class TermKitTranscoderUI {
                 statusLabel?.text = "Status: invalid time '\(text)'"
                 return
             }
-            do {
-                try self.player.seek(to: min(max(0, target), self.duration))
-                self.lastKnownPosition = target
-                statusLabel?.text = "Status: jump to \(self.formatTime(target))"
-            } catch {
-                statusLabel?.text = "Status: jump error \(error)"
-            }
+            self.seekTo(target, statusLabel: statusLabel)
         }
 
+        window.addSubview(outputFrame)
         window.addSubview(statusLabel)
         window.addSubview(timeLabel)
         window.addSubview(percentLabel)
@@ -170,12 +218,31 @@ final class TermKitTranscoderUI {
         top.addSubview(window)
         Application.top.addSubview(top)
 
-        top.handleKey = { [weak self] event in
+        top.handleKey = { [weak self, weak outputRadio, weak jumpField, weak statusLabel] event in
             guard let self = self else { return false }
+            // Let the radio group handle its own keys when focused (space/enter), but still allow global shortcuts.
+            if outputRadio?.hasFocus == true {
+                if case .letter(let ch) = event.key {
+                    switch ch {
+                    case "q", "Q":
+                        self.cleanupCurrentPlayer()
+                        self.onCleanup?()
+                        Application.requestStop()
+                        return true
+                    case "j", "J":
+                        self.focusAndJump(jumpField: jumpField, statusLabel: statusLabel)
+                        return true
+                    default:
+                        break
+                    }
+                }
+                return false
+            }
             switch event.key {
             case .letter(let ch):
                 switch ch {
                 case "q", "Q":
+                    self.cleanupCurrentPlayer()
                     self.onCleanup?()
                     Application.requestStop()
                     return true
@@ -183,7 +250,7 @@ final class TermKitTranscoderUI {
                     self.focusAndJump(jumpField: jumpField, statusLabel: statusLabel)
                     return true
                 case " ":
-                    self.togglePlayPause(statusLabel: statusLabel)
+                    self.handlePlayPause(statusLabel: statusLabel)
                     return true
                 case "[":
                     self.scrub(by: -10, statusLabel: statusLabel)
@@ -202,6 +269,7 @@ final class TermKitTranscoderUI {
         startTimer(statusLabel: statusLabel, timeLabel: timeLabel, percentLabel: percentLabel, barLabel: barLabel)
         Application.run()
         timer?.cancel()
+        cleanupCurrentPlayer()
         onCleanup?()
     }
 
@@ -211,22 +279,31 @@ final class TermKitTranscoderUI {
         timer.schedule(deadline: .now(), repeating: .milliseconds(250))
         timer.setEventHandler { [weak self, weak statusLabel, weak timeLabel, weak percentLabel] in
             guard let self = self else { return }
+            guard let player = self.playerHandle?.player else {
+                statusLabel?.text = "Status: idle (choose output, press Play)"
+                timeLabel?.text = "Time: \(self.formatTime(self.lastKnownPosition)) / \(self.formatTime(self.duration))"
+                percentLabel?.text = "Progress: 0%"
+                barLabel.text = self.makeBarText(position: self.lastKnownPosition)
+                return
+            }
+
             let position: TimeInterval
-            if let p = try? self.player.getPosition() {
+            if let p = try? player.getPosition() {
                 position = p
                 self.lastKnownPosition = p
-            } else if let mpv = self.player as? MpvPlayer {
+            } else if let mpv = player as? MpvPlayer {
                 position = mpv.extrapolatedPosition()
                 self.lastKnownPosition = position
             } else {
                 position = self.lastKnownPosition
             }
 
-            let paused = (try? self.player.isPaused()) ?? self.lastKnownPaused
+            let paused = (try? player.isPaused()) ?? self.lastKnownPaused
             self.lastKnownPaused = paused
 
             let percent = self.duration > 0 ? (position / self.duration) * 100 : 0
-            statusLabel?.text = "Status: \(paused ? "paused" : "playing")"
+            let outputName = (self.selectedOutput == .mpv) ? "mpv" : "Chromecast"
+            statusLabel?.text = "Status: \(paused ? "paused" : "playing") via \(outputName)"
             timeLabel?.text = "Time: \(self.formatTime(position)) / \(self.formatTime(self.duration))"
             percentLabel?.text = "Progress: \(Int(round(percent)))%"
             barLabel.text = self.makeBarText(position: position)
@@ -235,30 +312,221 @@ final class TermKitTranscoderUI {
         timer.resume()
     }
 
-    private func togglePlayPause(statusLabel: Label?) {
-        do {
-            let paused = (try? player.isPaused()) ?? lastKnownPaused
-            if paused {
-                try player.resume()
-                lastKnownPaused = false
-                statusLabel?.text = "Status: playing"
-            } else {
-                try player.pause()
-                lastKnownPaused = true
-                statusLabel?.text = "Status: paused"
+    private func handlePlayPause(statusLabel: Label?) {
+        ensurePlayerAvailable(statusLabel: statusLabel) { [weak self] ready in
+            guard ready, let self = self, let player = self.playerHandle?.player else { return }
+            do {
+                let paused = (try? player.isPaused()) ?? self.lastKnownPaused
+                if paused {
+                    try player.resume()
+                    self.lastKnownPaused = false
+                    statusLabel?.text = "Status: playing via \(self.selectedOutput == .mpv ? "mpv" : "Chromecast")"
+                } else {
+                    try player.pause()
+                    self.lastKnownPaused = true
+                    statusLabel?.text = "Status: paused"
+                }
+            } catch {
+                statusLabel?.text = "Status: error \(error)"
             }
-        } catch {
-            statusLabel?.text = "Status: error \(error)"
         }
     }
 
+    private func ensurePlayerAvailable(statusLabel: Label?, completion: @escaping (Bool) -> Void) {
+        if isLaunching {
+            statusLabel?.text = "Status: launching..."
+            completion(false)
+            return
+        }
+
+        if let handle = playerHandle, handle.output == selectedOutput {
+            completion(true)
+            return
+        }
+
+        guard let output = selectedOutput else {
+            statusLabel?.text = "Status: select an output first"
+            isLaunching = false
+            completion(false)
+            return
+        }
+
+        isLaunching = true
+        cleanupCurrentPlayer()
+
+        switch output {
+        case .mpv:
+            do {
+                statusLabel?.text = "Status: starting mpv..."
+                let handle = try launchMpv()
+                playerHandle = handle
+                lastKnownPaused = false
+                completion(true)
+            } catch {
+                statusLabel?.text = "Status: mpv error \(error)"
+                completion(false)
+            }
+            isLaunching = false
+        case .chromecast:
+            resolveChromecastDevice(statusLabel: statusLabel) { device in
+                self.isLaunching = false
+                guard let device else {
+                    completion(false)
+                    return
+                }
+                do {
+                    let handle = try self.launchChromecast(to: device)
+                    self.playerHandle = handle
+                    self.lastKnownPaused = false
+                    // Persist chosen device.
+                    self.config.chromecast.defaultDevice = device.name
+                    try? self.config.save()
+                    self.persistDefaultOutput(.chromecast)
+                    completion(true)
+                } catch {
+                    statusLabel?.text = "Status: Chromecast error \(error)"
+                    completion(false)
+                }
+            }
+            return
+        }
+        isLaunching = false
+    }
+
+    private func launchMpv() throws -> PlayerHandle {
+        let controller = MpvController()
+        _ = try controller.launch(url: server.url, windowTitle: "Beamy Player (mpv)")
+        let player = MpvPlayer(controller: controller, server: server, streamURL: server.url)
+        if lastKnownPosition > 0 {
+            try? player.seek(to: lastKnownPosition)
+        }
+        if lastKnownPaused {
+            try? player.pause()
+        }
+        return PlayerHandle(output: .mpv, player: player, cleanup: {
+            controller.quit()
+        })
+    }
+
+    private func launchChromecast(to device: ChromecastDevice) throws -> PlayerHandle {
+        let client = CastV2Client(device: device, verbose: true)
+        try client.connect()
+        try client.launchDefaultMediaReceiver()
+        try client.loadMedia(url: server.url, contentType: "video/mp2t", title: title, isLive: true)
+        let player = ChromecastPlayer(client: client)
+        if lastKnownPosition > 0 {
+            try? player.seek(to: lastKnownPosition)
+        }
+        if lastKnownPaused {
+            try? player.pause()
+        }
+        return PlayerHandle(output: .chromecast, player: player, cleanup: {
+            client.disconnect()
+        })
+    }
+
+    private func resolveChromecastDevice(statusLabel: Label?, completion: @escaping (ChromecastDevice?) -> Void) {
+        let timeout = config.chromecast.discoveryTimeout
+        if let preferred = config.chromecast.defaultDevice {
+            statusLabel?.text = "Status: checking Chromecast \(preferred)..."
+            let device = try? ChromecastDiscovery.findDevice(named: preferred, timeout: timeout)
+            if let device {
+                completion(device)
+            } else {
+                presentDiscovery(statusLabel: statusLabel, timeout: timeout, completion: completion)
+            }
+        } else {
+            presentDiscovery(statusLabel: statusLabel, timeout: timeout, completion: completion)
+        }
+    }
+
+    private func presentDiscovery(statusLabel: Label?, timeout: Double, completion: @escaping (ChromecastDevice?) -> Void) {
+        statusLabel?.text = "Status: discovering Chromecast devices..."
+        let devices = (try? ChromecastDiscovery.discover(timeout: timeout)) ?? []
+        if devices.isEmpty {
+            statusLabel?.text = "Status: no Chromecast devices found"
+            completion(nil)
+            return
+        }
+        showDiscoveryDialog(devices: devices, completion: completion)
+    }
+
+    private func showDiscoveryDialog(devices: [ChromecastDevice], completion: @escaping (ChromecastDevice?) -> Void) {
+        let width = min(max(50, devices.map { $0.name.count }.max() ?? 0 + 10), 80)
+        let height = min(max(8, devices.count + 4), 20)
+        let dialog = Dialog(title: "Select Chromecast", width: width, height: height, buttons: [])
+        dialog.modal = true
+        dialog.closedCallback = {
+            completion(nil)
+        }
+
+        let list = ListView(items: devices.map { $0.name })
+        list.allowMarking = false
+        list.allowsMultipleSelection = false
+        list.selectedItem = 0
+        list.x = Pos.at(1)
+        list.y = Pos.at(1)
+        list.width = Dim.fill(1)
+        list.height = Dim.fill(3)
+        dialog.addSubview(list)
+
+        let ok = Button("OK")
+        ok.clicked = { _ in
+            let idx = list.selectedItem
+            let device = idx < devices.count ? devices[idx] : devices.first
+            Application.requestStop()
+            completion(device)
+        }
+
+        let cancel = Button("Cancel")
+        cancel.clicked = { _ in
+            Application.requestStop()
+            completion(nil)
+        }
+
+        dialog.addButton(ok)
+        dialog.addButton(cancel)
+
+        Application.present(top: dialog)
+    }
+
+    private func persistDefaultOutput(_ choice: OutputChoice) {
+        config.ui.defaultOutput = (choice == .mpv) ? "mpv" : "chromecast"
+        try? config.save()
+    }
+
+    private func cleanupCurrentPlayer() {
+        playerHandle?.cleanup()
+        playerHandle = nil
+    }
+
     private func scrub(by offset: TimeInterval, statusLabel: Label?) {
+        guard let player = playerHandle?.player else {
+            statusLabel?.text = "Status: start playback first"
+            return
+        }
         let target = min(duration, max(0, lastKnownPosition + offset))
         do {
             try player.seek(to: target)
+            lastKnownPosition = target
             statusLabel?.text = "Status: seek to \(formatTime(target))"
         } catch {
             statusLabel?.text = "Status: seek error \(error)"
+        }
+    }
+
+    private func seekTo(_ target: TimeInterval, statusLabel: Label?) {
+        guard let player = playerHandle?.player else {
+            statusLabel?.text = "Status: start playback first"
+            return
+        }
+        let clamped = min(max(0, target), duration)
+        do {
+            try player.seek(to: clamped)
+            lastKnownPosition = clamped
+            statusLabel?.text = "Status: jump to \(formatTime(clamped))"
+        } catch {
+            statusLabel?.text = "Status: jump error \(error)"
         }
     }
 
@@ -293,14 +561,7 @@ final class TermKitTranscoderUI {
         // If there's already text, attempt a jump.
         let text = jumpField.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let target = parseTime(text) else { return }
-        do {
-            let clamped = min(max(0, target), duration)
-            try player.seek(to: clamped)
-            lastKnownPosition = clamped
-            statusLabel?.text = "Status: jump to \(formatTime(clamped))"
-        } catch {
-            statusLabel?.text = "Status: jump error \(error)"
-        }
+        seekTo(target, statusLabel: statusLabel)
     }
 
     private func makeBarText(position: TimeInterval) -> String {
@@ -321,5 +582,17 @@ final class TermKitTranscoderUI {
         let empty = String(repeating: "-", count: emptyCount)
         let bar = "\(filled)|\(empty)"
         return "\(prefix) [\(bar)] \(suffix)"
+    }
+
+    private func makeScheme(normalFore: Color, normalBack: Color, focusFore: Color, focusBack: Color) -> ColorScheme {
+        let normal = Application.makeAttribute(fore: normalFore, back: normalBack)
+        // Use a simple emphasis on focus without relying on driver-specific flags.
+        let focus = Application.makeAttribute(fore: focusFore, back: focusBack)
+        return ColorScheme(
+            normal: normal,
+            focus: focus,
+            hotNormal: normal,
+            hotFocus: focus
+        )
     }
 }

@@ -5,6 +5,37 @@ public struct Config: Codable {
     public var ffmpeg: FFmpegConfig
     public var server: ServerConfig
     public var chromecast: ChromecastConfig
+    public var ui: UIConfig
+
+    enum CodingKeys: String, CodingKey {
+        case ffmpeg
+        case server
+        case chromecast
+        case ui
+    }
+
+    public init(ffmpeg: FFmpegConfig, server: ServerConfig, chromecast: ChromecastConfig, ui: UIConfig) {
+        self.ffmpeg = ffmpeg
+        self.server = server
+        self.chromecast = chromecast
+        self.ui = ui
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ffmpeg = try container.decodeIfPresent(FFmpegConfig.self, forKey: .ffmpeg) ?? .default
+        server = try container.decodeIfPresent(ServerConfig.self, forKey: .server) ?? .default
+        chromecast = try container.decodeIfPresent(ChromecastConfig.self, forKey: .chromecast) ?? .default
+        ui = try container.decodeIfPresent(UIConfig.self, forKey: .ui) ?? .default
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(ffmpeg, forKey: .ffmpeg)
+        try container.encode(server, forKey: .server)
+        try container.encode(chromecast, forKey: .chromecast)
+        try container.encode(ui, forKey: .ui)
+    }
 
     public struct FFmpegConfig: Codable {
         public var ffmpegPath: String
@@ -48,11 +79,21 @@ public struct Config: Codable {
         }
     }
 
+    public struct UIConfig: Codable {
+        /// "mpv" or "chromecast"
+        public var defaultOutput: String?
+
+        public static var `default`: UIConfig {
+            UIConfig(defaultOutput: nil)
+        }
+    }
+
     public static var `default`: Config {
         Config(
             ffmpeg: .default,
             server: .default,
-            chromecast: .default
+            chromecast: .default,
+            ui: .default
         )
     }
 
