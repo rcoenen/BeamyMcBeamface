@@ -37,9 +37,9 @@ class CastingViewModel: ObservableObject {
     }
     @Published var isSwitchingOutput = false
     @Published var statusMessage: String = "Drop a video file to start"
-    @Published var useEmbeddedPlayer: Bool = false  // Disabled - crashes during window activation
+    @Published var useEmbeddedPlayer: Bool = true  // AVPlayer embedded playback
 
-    // Embedded player state (for MpvPlayerView binding)
+    // Embedded player state (for AVPlayerView binding)
     @Published var embeddedIsPlaying: Bool = false
     @Published var embeddedCurrentTime: TimeInterval = 0
     @Published var embeddedDuration: TimeInterval = 0
@@ -105,8 +105,6 @@ class CastingViewModel: ObservableObject {
         return playerHandle != nil
     }
 
-    // Reference to embedded player coordinator for control
-    var embeddedPlayerCoordinator: MpvPlayerView.Coordinator?
 
     // MARK: Initialization
 
@@ -192,25 +190,36 @@ class CastingViewModel: ObservableObject {
         currentFile = url
         errorMessage = nil
 
-        // Get media info for duration (only needed for non-embedded playback)
-        if !useEmbeddedPlayer || outputType != .mpv {
-            do {
-                let info = try FFmpeg.getMediaInfo(file: url)
-                self.mediaInfo = info
-                self.duration = info.duration
-            } catch {
-                errorMessage = "Failed to read media info: \(error.localizedDescription)"
-                return
+        // Check if AVPlayer can play this format (for embedded playback)
+        if useEmbeddedPlayer && outputType == .mpv {
+            if AVPlayerView.canPlay(url: url) {
+                // AVPlayer supports this format - play embedded
+                statusMessage = "Playing embedded"
+            } else {
+                // Unsupported format - fall back to external mpv
+                do {
+                    let controller = MpvController()
+                    _ = try controller.launch(url: url, windowTitle: "Beamy Player")
+                    statusMessage = "Playing in external window (format not supported for embedded playback)"
+                } catch {
+                    errorMessage = "Failed to launch mpv: \(error.localizedDescription)"
+                }
             }
+            return
         }
 
-        // Only start transcoder if not using embedded playback
-        // (embedded mpv plays the source file directly)
-        if useEmbeddedPlayer && outputType == .mpv {
-            statusMessage = "Playing embedded"
-        } else {
-            startTranscoder()
+        // Get media info for duration (needed for transcoded playback)
+        do {
+            let info = try FFmpeg.getMediaInfo(file: url)
+            self.mediaInfo = info
+            self.duration = info.duration
+        } catch {
+            errorMessage = "Failed to read media info: \(error.localizedDescription)"
+            return
         }
+
+        // Start transcoder for non-embedded playback
+        startTranscoder()
     }
 
     private func startTranscoder() {
@@ -464,9 +473,9 @@ class CastingViewModel: ObservableObject {
     // MARK: Playback Controls
 
     func togglePlayPause() {
-        // For embedded mpv, control via coordinator
+        // For embedded AVPlayer, control via binding
         if useEmbeddedPlayer && outputType == .mpv {
-            embeddedPlayerCoordinator?.togglePause()
+            embeddedIsPlaying.toggle()
             return
         }
 
@@ -506,18 +515,18 @@ class CastingViewModel: ObservableObject {
     }
 
     func skipForward() {
-        // For embedded player, use relative seek
+        // For embedded AVPlayer, seek via currentTime binding
         if useEmbeddedPlayer && outputType == .mpv {
-            embeddedPlayerCoordinator?.seekRelative(10)
+            embeddedCurrentTime = min(embeddedCurrentTime + 10, embeddedDuration)
             return
         }
         seek(to: currentTime + 10)
     }
 
     func skipBackward() {
-        // For embedded player, use relative seek
+        // For embedded AVPlayer, seek via currentTime binding
         if useEmbeddedPlayer && outputType == .mpv {
-            embeddedPlayerCoordinator?.seekRelative(-10)
+            embeddedCurrentTime = max(0, embeddedCurrentTime - 10)
             return
         }
         seek(to: max(0, currentTime - 10))
@@ -527,9 +536,9 @@ class CastingViewModel: ObservableObject {
         let dur = useEmbeddedPlayer && outputType == .mpv ? effectiveDuration : duration
         let clamped = min(max(0, time), dur)
 
-        // For embedded mpv, control via coordinator
+        // For embedded AVPlayer, seek via currentTime binding
         if useEmbeddedPlayer && outputType == .mpv {
-            embeddedPlayerCoordinator?.seek(to: clamped)
+            embeddedCurrentTime = clamped
             return
         }
 
