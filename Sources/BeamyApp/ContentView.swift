@@ -227,50 +227,65 @@ struct ContentView: View {
             // Control panel or drop zone
             ZStack {
                 if viewModel.currentFile != nil {
-                    // Playback panel (simple, like TUI)
+                    // Playback panel
                     VStack(spacing: 0) {
-                        // Main content area - just file info and status
-                        VStack(spacing: 16) {
-                            Spacer()
+                        // Main content area - embedded player or info display
+                        if viewModel.useEmbeddedPlayer && viewModel.outputType == .mpv {
+                            // Embedded mpv player
+                            MpvPlayerView(
+                                url: viewModel.currentFile,
+                                isPlaying: $viewModel.embeddedIsPlaying,
+                                currentTime: $viewModel.embeddedCurrentTime,
+                                duration: $viewModel.embeddedDuration,
+                                onCoordinatorReady: { coordinator in
+                                    viewModel.embeddedPlayerCoordinator = coordinator
+                                }
+                            )
+                            .background(Color.black)
+                        } else {
+                            // Non-embedded mode: file info and status
+                            VStack(spacing: 16) {
+                                Spacer()
 
-                            // File name
-                            if let file = viewModel.currentFile {
+                                // File name
+                                if let file = viewModel.currentFile {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "film")
+                                            .font(.title2)
+                                        Text(file.lastPathComponent)
+                                            .font(.title2)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                    .foregroundColor(.primary)
+                                }
+
+                                // Output indicator
                                 HStack(spacing: 8) {
-                                    Image(systemName: "film")
-                                        .font(.title2)
-                                    Text(file.lastPathComponent)
-                                        .font(.title2)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
+                                    Image(systemName: viewModel.outputType == .mpv ? "desktopcomputer" : "tv")
+                                    if viewModel.outputType == .mpv {
+                                        Text("Playing locally via mpv")
+                                    } else if let device = viewModel.selectedDevice {
+                                        Text("Casting to \(device.name)")
+                                    } else {
+                                        Text("Chromecast - no device selected")
+                                    }
                                 }
-                                .foregroundColor(.primary)
-                            }
+                                .font(.headline)
+                                .foregroundColor(.secondary)
 
-                            // Output indicator
-                            HStack(spacing: 8) {
-                                Image(systemName: viewModel.outputType == .mpv ? "desktopcomputer" : "tv")
-                                if viewModel.outputType == .mpv {
-                                    Text("Playing locally via mpv")
-                                } else if let device = viewModel.selectedDevice {
-                                    Text("Casting to \(device.name)")
-                                } else {
-                                    Text("Chromecast - no device selected")
+                                // Error message
+                                if let error = viewModel.errorMessage {
+                                    Text(error)
+                                        .foregroundColor(.red)
+                                        .font(.caption)
+                                        .padding(.horizontal)
                                 }
-                            }
-                            .font(.headline)
-                            .foregroundColor(.secondary)
 
-                            // Error message
-                            if let error = viewModel.errorMessage {
-                                Text(error)
-                                    .foregroundColor(.red)
-                                    .font(.caption)
-                                    .padding(.horizontal)
+                                Spacer()
                             }
-
-                            Spacer()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                         // Playback controls
                         PlaybackControlsView()

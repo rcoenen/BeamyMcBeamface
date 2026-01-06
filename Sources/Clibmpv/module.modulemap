@@ -1,0 +1,5 @@
+module Clibmpv [system] {
+    header "shim.h"
+    link "mpv"
+    export *
+}

@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .library(name: "BeamyKit", targets: ["BeamyKit"]),
+        .library(name: "Clibmpv", targets: ["Clibmpv"]),
         .executable(name: "beamy", targets: ["Beamy"]),
     ],
     dependencies: [
@@ -18,10 +19,19 @@ let package = Package(
         .package(url: "https://github.com/migueldeicaza/TermKit.git", branch: "main"),
     ],
     targets: [
+        // C wrapper for libmpv
+        .systemLibrary(
+            name: "Clibmpv",
+            pkgConfig: "mpv",
+            providers: [
+                .brew(["mpv"])
+            ]
+        ),
         // Shared library
         .target(
             name: "BeamyKit",
             dependencies: [
+                "Clibmpv",
                 .product(name: "TOMLKit", package: "TOMLKit"),
             ]
         ),

@@ -20,6 +20,8 @@ targets:
     dependencies:
       - package: Beamy
         product: BeamyKit
+      - package: Beamy
+        product: Clibmpv
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.beamy.mcbeamface

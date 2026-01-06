@@ -37,6 +37,12 @@ class CastingViewModel: ObservableObject {
     }
     @Published var isSwitchingOutput = false
     @Published var statusMessage: String = "Drop a video file to start"
+    @Published var useEmbeddedPlayer: Bool = false  // Embedded mpv disabled - needs OpenGL debugging
+
+    // Embedded player state (for MpvPlayerView binding)
+    @Published var embeddedIsPlaying: Bool = false
+    @Published var embeddedCurrentTime: TimeInterval = 0
+    @Published var embeddedDuration: TimeInterval = 0
 
     // MARK: Internal State
 
@@ -53,11 +59,19 @@ class CastingViewModel: ObservableObject {
     // MARK: Computed Properties (query Player, not TranscodeServer)
 
     var isPlaying: Bool {
+        // For embedded mpv, use the binding state
+        if useEmbeddedPlayer && outputType == .mpv {
+            return embeddedIsPlaying
+        }
         guard let player = playerHandle?.player else { return false }
         return !((try? player.isPaused()) ?? true)
     }
 
     var currentTime: TimeInterval {
+        // For embedded mpv, use the binding state
+        if useEmbeddedPlayer && outputType == .mpv {
+            return embeddedCurrentTime
+        }
         guard let player = playerHandle?.player else { return lastKnownPosition }
 
         // For Chromecast LIVE streams, add seek offset (like TUI)
@@ -68,17 +82,31 @@ class CastingViewModel: ObservableObject {
         return (try? player.getPosition()) ?? lastKnownPosition
     }
 
+    var effectiveDuration: TimeInterval {
+        // For embedded mpv, use the binding state if available
+        if useEmbeddedPlayer && outputType == .mpv && embeddedDuration > 0 {
+            return embeddedDuration
+        }
+        return duration
+    }
+
     var progress: Double {
-        duration > 0 ? currentTime / duration : 0
+        effectiveDuration > 0 ? currentTime / effectiveDuration : 0
     }
 
     var timeRemaining: TimeInterval {
-        max(0, duration - currentTime)
+        max(0, effectiveDuration - currentTime)
     }
 
     var hasPlayer: Bool {
-        playerHandle != nil
+        if useEmbeddedPlayer && outputType == .mpv {
+            return currentFile != nil
+        }
+        return playerHandle != nil
     }
+
+    // Reference to embedded player coordinator for control
+    var embeddedPlayerCoordinator: MpvPlayerView.Coordinator?
 
     // MARK: Initialization
 
@@ -164,17 +192,25 @@ class CastingViewModel: ObservableObject {
         currentFile = url
         errorMessage = nil
 
-        // Get media info for duration
-        do {
-            let info = try FFmpeg.getMediaInfo(file: url)
-            self.mediaInfo = info
-            self.duration = info.duration
-        } catch {
-            errorMessage = "Failed to read media info: \(error.localizedDescription)"
-            return
+        // Get media info for duration (only needed for non-embedded playback)
+        if !useEmbeddedPlayer || outputType != .mpv {
+            do {
+                let info = try FFmpeg.getMediaInfo(file: url)
+                self.mediaInfo = info
+                self.duration = info.duration
+            } catch {
+                errorMessage = "Failed to read media info: \(error.localizedDescription)"
+                return
+            }
         }
 
-        startTranscoder()
+        // Only start transcoder if not using embedded playback
+        // (embedded mpv plays the source file directly)
+        if useEmbeddedPlayer && outputType == .mpv {
+            statusMessage = "Playing embedded"
+        } else {
+            startTranscoder()
+        }
     }
 
     private func startTranscoder() {
@@ -266,6 +302,59 @@ class CastingViewModel: ObservableObject {
     func switchOutput(to newOutput: OutputType) {
         guard !isSwitchingOutput else {
             statusMessage = "Output switch in progress..."
+            return
+        }
+
+        // For embedded mpv mode
+        if useEmbeddedPlayer && newOutput == .mpv {
+            outputType = newOutput
+            statusMessage = "Playing embedded"
+            return
+        }
+
+        // Switching to Chromecast from embedded mpv - need to start transcoder
+        if useEmbeddedPlayer && outputType == .mpv && newOutput == .chromecast {
+            // Get position from embedded player
+            let position = embeddedCurrentTime
+
+            // Need to get media info for transcoder
+            if mediaInfo == nil, let url = currentFile {
+                do {
+                    let info = try FFmpeg.getMediaInfo(file: url)
+                    self.mediaInfo = info
+                    self.duration = info.duration
+                } catch {
+                    errorMessage = "Failed to read media info: \(error.localizedDescription)"
+                    return
+                }
+            }
+
+            // Start transcoder if needed
+            if transcodeServer == nil {
+                startTranscoder()
+            }
+
+            outputType = newOutput
+
+            // If no device selected, just update output type
+            if selectedDevice == nil {
+                statusMessage = "Select a Chromecast device"
+                return
+            }
+
+            isSwitchingOutput = true
+            statusMessage = "Switching to Chromecast..."
+
+            Task {
+                do {
+                    try await launchPlayer(output: newOutput, seekTo: position, paused: false)
+                    statusMessage = "Playing via Chromecast"
+                } catch {
+                    errorMessage = "Failed to switch output: \(error.localizedDescription)"
+                    statusMessage = "Output switch failed"
+                }
+                isSwitchingOutput = false
+            }
             return
         }
 
@@ -375,6 +464,12 @@ class CastingViewModel: ObservableObject {
     // MARK: Playback Controls
 
     func togglePlayPause() {
+        // For embedded mpv, control via coordinator
+        if useEmbeddedPlayer && outputType == .mpv {
+            embeddedPlayerCoordinator?.togglePause()
+            return
+        }
+
         // If no player, launch one first
         if playerHandle == nil {
             guard transcodeServer != nil else { return }
@@ -411,15 +506,32 @@ class CastingViewModel: ObservableObject {
     }
 
     func skipForward() {
+        // For embedded player, use relative seek
+        if useEmbeddedPlayer && outputType == .mpv {
+            embeddedPlayerCoordinator?.seekRelative(10)
+            return
+        }
         seek(to: currentTime + 10)
     }
 
     func skipBackward() {
+        // For embedded player, use relative seek
+        if useEmbeddedPlayer && outputType == .mpv {
+            embeddedPlayerCoordinator?.seekRelative(-10)
+            return
+        }
         seek(to: max(0, currentTime - 10))
     }
 
     func seek(to time: TimeInterval) {
-        let clamped = min(max(0, time), duration)
+        let dur = useEmbeddedPlayer && outputType == .mpv ? effectiveDuration : duration
+        let clamped = min(max(0, time), dur)
+
+        // For embedded mpv, control via coordinator
+        if useEmbeddedPlayer && outputType == .mpv {
+            embeddedPlayerCoordinator?.seek(to: clamped)
+            return
+        }
 
         guard let player = playerHandle?.player else {
             lastKnownPosition = clamped
@@ -442,7 +554,8 @@ class CastingViewModel: ObservableObject {
     }
 
     func seekToProgress(_ progress: Double) {
-        seek(to: progress * duration)
+        let dur = useEmbeddedPlayer && outputType == .mpv ? effectiveDuration : duration
+        seek(to: progress * dur)
     }
 
     // MARK: Cleanup
