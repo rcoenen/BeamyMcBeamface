@@ -912,8 +912,16 @@ final class TermKitTranscoderUI {
         }
         let target = min(duration, max(0, lastKnownPosition + offset))
         do {
-            try player.seek(to: target)
+            // For Chromecast, we need to reload the stream at new position
+            // because LIVE streams don't support seeking
+            if let chromecastPlayer = player as? ChromecastPlayer {
+                server.seek(to: target, awaitClientReconnect: true)
+                try chromecastPlayer.reload(url: server.url)
+            } else {
+                try player.seek(to: target)
+            }
             lastKnownPosition = target
+            lastSeekTime = Date()
             statusLabel?.text = "Status: seek to \(formatTime(target))"
         } catch {
             statusLabel?.text = "Status: seek error \(error)"
@@ -927,7 +935,14 @@ final class TermKitTranscoderUI {
         }
         let clamped = min(max(0, target), duration)
         do {
-            try player.seek(to: clamped)
+            // For Chromecast, we need to reload the stream at new position
+            // because LIVE streams don't support seeking
+            if let chromecastPlayer = player as? ChromecastPlayer {
+                server.seek(to: clamped, awaitClientReconnect: true)
+                try chromecastPlayer.reload(url: server.url)
+            } else {
+                try player.seek(to: clamped)
+            }
             lastKnownPosition = clamped
             lastSeekTime = Date()
             statusLabel?.text = "Status: jump to \(formatTime(clamped))"
