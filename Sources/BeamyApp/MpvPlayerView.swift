@@ -2,26 +2,139 @@ import SwiftUI
 import AppKit
 import OpenGL.GL
 import OpenGL.GL3
-import Clibmpv
+import Libmpv
 import Foundation
 
+// NOTE: Embedded mpv playback is currently disabled (useEmbeddedPlayer = false in CastingViewModel)
+// because NSOpenGLView embedded in SwiftUI causes crashes during window activation.
+// The crash happens in AppKit theming code (_CUIThemeFacetCacheKey) when the window
+// gains focus. This is a known limitation of embedding NSOpenGLView in SwiftUI.
+// Future options: Use Metal instead of OpenGL, or use a separate window for video.
+
+private let logFile = "/tmp/beamy-mpv.log"
+
 private func mpvLog(_ message: String) {
-    NSLog("[MpvPlayerView] %@", message)
+    let timestamp = ISO8601DateFormatter().string(from: Date())
+    let line = "[\(timestamp)] \(message)\n"
+    if let data = line.data(using: .utf8) {
+        if FileManager.default.fileExists(atPath: logFile) {
+            if let handle = FileHandle(forWritingAtPath: logFile) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            }
+        } else {
+            FileManager.default.createFile(atPath: logFile, contents: data)
+        }
+    }
 }
 
-// Silence OpenGL deprecation warnings - we need it for libmpv
-// In future, could migrate to Metal via mpv's Metal render API
+// Free function for C callback - can't capture Self
+private func mpvGetProcAddress(_ ctx: UnsafeMutableRawPointer?, _ name: UnsafePointer<Int8>?) -> UnsafeMutableRawPointer? {
+    let symbolName = CFStringCreateWithCString(kCFAllocatorDefault, name, CFStringBuiltInEncodings.ASCII.rawValue)
+    let identifier = CFBundleGetBundleWithIdentifier("com.apple.opengl" as CFString)
+    return CFBundleGetFunctionPointerForName(identifier, symbolName)
+}
 
-// MARK: - Embedded MPV Player using libmpv render API
+// MARK: - Notification names for mpv events (decouples from @MainActor types)
+private extension Notification.Name {
+    static let mpvNeedsDisplay = Notification.Name("mpvNeedsDisplay")
+    static let mpvPositionChanged = Notification.Name("mpvPositionChanged")
+    static let mpvDurationChanged = Notification.Name("mpvDurationChanged")
+    static let mpvPausedChanged = Notification.Name("mpvPausedChanged")
+    static let mpvPlaybackEnded = Notification.Name("mpvPlaybackEnded")
+}
 
-/// NSOpenGLView that hosts embedded mpv video playback
-@MainActor
+// MARK: - Callback Context (completely isolated from @MainActor types)
+// Uses NotificationCenter to signal events - no closures that could capture actor-isolated types
+private final class MpvCallbackContext: @unchecked Sendable {
+    let mpv: OpaquePointer
+    let queue: DispatchQueue
+    let viewId: ObjectIdentifier  // Use ID instead of view reference
+
+    init(mpv: OpaquePointer, queue: DispatchQueue, viewId: ObjectIdentifier) {
+        self.mpv = mpv
+        self.queue = queue
+        self.viewId = viewId
+    }
+
+    func triggerDisplay() {
+        // Post notification - no actor-isolated types referenced
+        NotificationCenter.default.post(name: .mpvNeedsDisplay, object: nil, userInfo: ["viewId": viewId])
+    }
+
+    func processEvents() {
+        let eventMpv = mpv
+        let vid = viewId
+
+        queue.async {
+            while true {
+                let event = mpv_wait_event(eventMpv, 0)
+                guard let eventPtr = event else { break }
+
+                if eventPtr.pointee.event_id == MPV_EVENT_NONE {
+                    break
+                }
+
+                switch eventPtr.pointee.event_id {
+                case MPV_EVENT_PROPERTY_CHANGE:
+                    guard let data = eventPtr.pointee.data else { break }
+                    let property = data.assumingMemoryBound(to: mpv_event_property.self).pointee
+                    let name = String(cString: property.name)
+                    guard property.data != nil else { break }
+
+                    switch name {
+                    case "time-pos":
+                        let value = property.data.assumingMemoryBound(to: Double.self).pointee
+                        NotificationCenter.default.post(name: .mpvPositionChanged, object: nil, userInfo: ["viewId": vid, "value": value])
+                    case "duration":
+                        let value = property.data.assumingMemoryBound(to: Double.self).pointee
+                        NotificationCenter.default.post(name: .mpvDurationChanged, object: nil, userInfo: ["viewId": vid, "value": value])
+                    case "pause":
+                        let value = property.data.assumingMemoryBound(to: Int32.self).pointee != 0
+                        NotificationCenter.default.post(name: .mpvPausedChanged, object: nil, userInfo: ["viewId": vid, "value": value])
+                    case "eof-reached":
+                        let value = property.data.assumingMemoryBound(to: Int32.self).pointee != 0
+                        if value {
+                            NotificationCenter.default.post(name: .mpvPlaybackEnded, object: nil, userInfo: ["viewId": vid])
+                        }
+                    default:
+                        break
+                    }
+
+                case MPV_EVENT_LOG_MESSAGE:
+                    if let msg = eventPtr.pointee.data?.assumingMemoryBound(to: mpv_event_log_message.self).pointee {
+                        let prefix = String(cString: msg.prefix)
+                        let level = String(cString: msg.level)
+                        let text = String(cString: msg.text).trimmingCharacters(in: .whitespacesAndNewlines)
+                        mpvLog("MPV[\(prefix)/\(level)]: \(text)")
+                    }
+
+                case MPV_EVENT_END_FILE:
+                    NotificationCenter.default.post(name: .mpvPlaybackEnded, object: nil, userInfo: ["viewId": vid])
+
+                case MPV_EVENT_SHUTDOWN:
+                    mpvLog("MPV shutdown event")
+                    return
+
+                default:
+                    break
+                }
+            }
+        }
+    }
+}
+
+// MARK: - MPV OpenGL View (based on MPVKit demo)
+
 final class MpvOpenGLView: NSOpenGLView {
     private var mpv: OpaquePointer?
-    private var mpvRenderContext: OpaquePointer?
-    private var displayLink: CVDisplayLink?
-    nonisolated(unsafe) private var isShuttingDown = false
+    private var mpvGL: OpaquePointer?
+    private var defaultFBO: GLint = -1
+    private var queue = DispatchQueue(label: "mpv", qos: .userInteractive)
     private(set) var isSetupComplete = false
+    private var callbackContext: MpvCallbackContext?
+    private var notificationObservers: [Any] = []
 
     // Callbacks for state changes
     var onPositionChanged: ((TimeInterval) -> Void)?
@@ -29,24 +142,22 @@ final class MpvOpenGLView: NSOpenGLView {
     var onPausedChanged: ((Bool) -> Void)?
     var onPlaybackEnded: (() -> Void)?
 
-    override init?(frame frameRect: NSRect, pixelFormat format: NSOpenGLPixelFormat?) {
-        // Create a pixel format for OpenGL 3.2 Core Profile
-        let attrs: [NSOpenGLPixelFormatAttribute] = [
-            UInt32(NSOpenGLPFAAccelerated),
-            UInt32(NSOpenGLPFADoubleBuffer),
-            UInt32(NSOpenGLPFAColorSize), 24,
-            UInt32(NSOpenGLPFAAlphaSize), 8,
-            UInt32(NSOpenGLPFADepthSize), 24,
-            UInt32(NSOpenGLPFAOpenGLProfile), UInt32(NSOpenGLProfileVersion3_2Core),
-            0
+    override class func defaultPixelFormat() -> NSOpenGLPixelFormat {
+        let attributes: [NSOpenGLPixelFormatAttribute] = [
+            NSOpenGLPixelFormatAttribute(NSOpenGLPFADoubleBuffer),
+            NSOpenGLPixelFormatAttribute(NSOpenGLPFAColorSize), NSOpenGLPixelFormatAttribute(32),
+            NSOpenGLPixelFormatAttribute(NSOpenGLPFADepthSize), NSOpenGLPixelFormatAttribute(24),
+            NSOpenGLPixelFormatAttribute(NSOpenGLPFAStencilSize), NSOpenGLPixelFormatAttribute(8),
+            NSOpenGLPixelFormatAttribute(NSOpenGLPFAMultisample),
+            NSOpenGLPixelFormatAttribute(NSOpenGLPFASampleBuffers), NSOpenGLPixelFormatAttribute(1),
+            NSOpenGLPixelFormatAttribute(NSOpenGLPFASamples), NSOpenGLPixelFormatAttribute(4),
+            NSOpenGLPixelFormatAttribute(0)
         ]
+        return NSOpenGLPixelFormat(attributes: attributes)!
+    }
 
-        guard let pixelFormat = NSOpenGLPixelFormat(attributes: attrs) else {
-            return nil
-        }
-
-        super.init(frame: frameRect, pixelFormat: pixelFormat)
-
+    override init?(frame frameRect: NSRect, pixelFormat format: NSOpenGLPixelFormat?) {
+        super.init(frame: frameRect, pixelFormat: format ?? Self.defaultPixelFormat())
         wantsBestResolutionOpenGLSurface = true
     }
 
@@ -54,25 +165,18 @@ final class MpvOpenGLView: NSOpenGLView {
         fatalError("init(coder:) not implemented")
     }
 
-    deinit {
-        // Note: shutdown() should be called before deinit via dismantleNSView
+    func setupContext() {
+        autoresizingMask = [.width, .height]
+        openGLContext?.makeCurrentContext()
+        mpvLog("OpenGL context setup complete")
     }
 
-    // MARK: - Setup
-
-    func setup() {
-        guard let context = openGLContext else {
-            mpvLog("No OpenGL context")
+    func setupMpv() {
+        guard !isSetupComplete else {
+            mpvLog("setupMpv already complete")
             return
         }
-        context.makeCurrentContext()
-        mpvLog("OpenGL context ready")
 
-        // Enable VSync
-        var swapInterval: GLint = 1
-        context.setValues(&swapInterval, for: .swapInterval)
-
-        // Initialize mpv
         mpv = mpv_create()
         guard mpv != nil else {
             mpvLog("Failed to create mpv context")
@@ -80,281 +184,193 @@ final class MpvOpenGLView: NSOpenGLView {
         }
         mpvLog("mpv created")
 
-        // Configure mpv for embedded rendering
-        checkError(mpv_set_option_string(mpv, "vo", "libmpv"))
+        // Configure mpv
+        checkError(mpv_request_log_messages(mpv, "v"))
         checkError(mpv_set_option_string(mpv, "hwdec", "auto-safe"))
+        checkError(mpv_set_option_string(mpv, "vo", "libmpv"))
         checkError(mpv_set_option_string(mpv, "keep-open", "yes"))
         checkError(mpv_set_option_string(mpv, "idle", "yes"))
 
-        // Initialize mpv
-        let initResult = mpv_initialize(mpv)
-        if initResult < 0 {
-            mpvLog("mpv_initialize failed: \(String(cString: mpv_error_string(initResult)))")
-            return
-        }
+        checkError(mpv_initialize(mpv))
         mpvLog("mpv initialized")
 
-        // Setup render context
-        setupRenderContext()
-        mpvLog("render context setup done, context: \(String(describing: self.mpvRenderContext))")
-
-        // Start display link for rendering
-        setupDisplayLink()
-
-        // Observe property changes
-        observeProperties()
-        isSetupComplete = true
-        mpvLog("setup complete")
-    }
-
-    private func setupRenderContext() {
-        guard let mpv = mpv else { return }
-
-        // Get proc address function
-        let getProcAddress: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> UnsafeMutableRawPointer? = { _, name in
-            guard let name = name else { return nil }
-            let symbol = CFStringCreateWithCString(kCFAllocatorDefault, name, kCFStringEncodingASCII)
-            let bundleURL = CFURLCreateWithFileSystemPath(
-                kCFAllocatorDefault,
-                "/System/Library/Frameworks/OpenGL.framework" as CFString,
-                CFURLPathStyle.cfurlposixPathStyle,
-                true
-            )
-            guard let bundle = CFBundleCreate(kCFAllocatorDefault, bundleURL) else { return nil }
-            return CFBundleGetFunctionPointerForName(bundle, symbol)
-        }
-
-        // Create OpenGL init params - must stay in scope during mpv_render_context_create
+        // Setup OpenGL render context
+        let api = UnsafeMutableRawPointer(mutating: (MPV_RENDER_API_TYPE_OPENGL as NSString).utf8String)
         var initParams = mpv_opengl_init_params(
-            get_proc_address: getProcAddress,
+            get_proc_address: mpvGetProcAddress,
             get_proc_address_ctx: nil
         )
 
-        // Build params and create context with pointers in scope
+        // Create callback context BEFORE setting up callbacks
+        // This context uses ObjectIdentifier instead of any @MainActor reference
+        let viewId = ObjectIdentifier(self)
+        let context = MpvCallbackContext(mpv: mpv!, queue: queue, viewId: viewId)
+        self.callbackContext = context
+
+        // Set up notification observers on main thread to handle events
+        setupNotificationObservers(viewId: viewId)
+
         withUnsafeMutablePointer(to: &initParams) { initParamsPtr in
-            var params: [mpv_render_param] = [
-                mpv_render_param(type: MPV_RENDER_PARAM_API_TYPE, data: UnsafeMutableRawPointer(mutating: MPV_RENDER_API_TYPE_OPENGL)),
-                mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, data: UnsafeMutableRawPointer(initParamsPtr)),
-                mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil)
+            var params = [
+                mpv_render_param(type: MPV_RENDER_PARAM_API_TYPE, data: api),
+                mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, data: initParamsPtr),
+                mpv_render_param()
             ]
 
-            let result = mpv_render_context_create(&mpvRenderContext, mpv, &params)
+            let result = mpv_render_context_create(&mpvGL, mpv, &params)
             if result < 0 {
-                print("Failed to create mpv render context: \(String(cString: mpv_error_string(result)))")
+                mpvLog("Failed to initialize mpv GL context: \(String(cString: mpv_error_string(result)))")
+                return
             }
+            mpvLog("mpv GL context created successfully!")
+
+            // Use callback context instead of view to avoid actor isolation issues
+            mpv_render_context_set_update_callback(
+                mpvGL,
+                { ctx in
+                    guard let ctx = ctx else { return }
+                    let context = Unmanaged<MpvCallbackContext>.fromOpaque(ctx).takeUnretainedValue()
+                    context.triggerDisplay()
+                },
+                UnsafeMutableRawPointer(Unmanaged.passUnretained(context).toOpaque())
+            )
         }
 
-        // Set update callback
-        if let renderContext = mpvRenderContext {
-            let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-            mpv_render_context_set_update_callback(renderContext, { ctx in
-                guard let ctx = ctx else { return }
-                let view = Unmanaged<MpvOpenGLView>.fromOpaque(ctx).takeUnretainedValue()
-                DispatchQueue.main.async {
-                    view.needsDisplay = true
-                }
-            }, selfPtr)
-        }
-    }
-
-    private func setupDisplayLink() {
-        // Skip display link - use mpv's update callback instead
-        // The render context callback will trigger needsDisplay when frames are ready
-        mpvLog("Display link setup skipped - using mpv update callback")
-    }
-
-    private func observeProperties() {
-        guard let mpv = mpv else { return }
-
-        // Observe playback position
+        // Observe properties
         mpv_observe_property(mpv, 0, "time-pos", MPV_FORMAT_DOUBLE)
         mpv_observe_property(mpv, 1, "duration", MPV_FORMAT_DOUBLE)
         mpv_observe_property(mpv, 2, "pause", MPV_FORMAT_FLAG)
         mpv_observe_property(mpv, 3, "eof-reached", MPV_FORMAT_FLAG)
 
-        // Start event polling on background queue
-        Task.detached { [weak self] in
-            await self?.eventLoop()
-        }
+        // Set wakeup callback for events using non-isolated context
+        mpv_set_wakeup_callback(mpv, { ctx in
+            guard let ctx = ctx else { return }
+            let context = Unmanaged<MpvCallbackContext>.fromOpaque(ctx).takeUnretainedValue()
+            context.processEvents()
+        }, UnsafeMutableRawPointer(Unmanaged.passUnretained(context).toOpaque()))
+
+        isSetupComplete = true
+        mpvLog("mpv setup complete")
     }
 
-    private func eventLoop() async {
-        while !isShuttingDown, let mpv = mpv {
-            let event = mpv_wait_event(mpv, 0.1)
-            guard event?.pointee.event_id != MPV_EVENT_NONE else { continue }
-
-            switch event?.pointee.event_id {
-            case MPV_EVENT_PROPERTY_CHANGE:
-                guard let prop = event?.pointee.data.assumingMemoryBound(to: mpv_event_property.self).pointee else { continue }
-                await handlePropertyChange(prop)
-
-            case MPV_EVENT_END_FILE:
-                await MainActor.run { [weak self] in
-                    self?.onPlaybackEnded?()
-                }
-
-            case MPV_EVENT_SHUTDOWN:
-                return
-
-            default:
-                break
-            }
-        }
-    }
-
-    private func handlePropertyChange(_ prop: mpv_event_property) async {
-        guard prop.data != nil else { return }
-        let name = String(cString: prop.name)
-
-        switch name {
-        case "time-pos":
-            let value = prop.data.assumingMemoryBound(to: Double.self).pointee
-            await MainActor.run { [weak self] in
-                self?.onPositionChanged?(value)
-            }
-
-        case "duration":
-            let value = prop.data.assumingMemoryBound(to: Double.self).pointee
-            await MainActor.run { [weak self] in
-                self?.onDurationChanged?(value)
-            }
-
-        case "pause":
-            let value = prop.data.assumingMemoryBound(to: Int32.self).pointee != 0
-            await MainActor.run { [weak self] in
-                self?.onPausedChanged?(value)
-            }
-
-        case "eof-reached":
-            let value = prop.data.assumingMemoryBound(to: Int32.self).pointee != 0
-            if value {
-                await MainActor.run { [weak self] in
-                    self?.onPlaybackEnded?()
-                }
-            }
-
-        default:
-            break
-        }
-    }
-
-    // MARK: - Rendering
-
-    func render() {
-        guard !isShuttingDown,
-              let context = openGLContext,
-              let renderContext = mpvRenderContext else { return }
-
-        context.makeCurrentContext()
-
-        let size = convertToBacking(bounds.size)
-        var fbo = mpv_opengl_fbo(
-            fbo: 0,
-            w: Int32(size.width),
-            h: Int32(size.height),
-            internal_format: 0
-        )
-
-        var flipY: Int32 = 1
-
-        withUnsafeMutablePointer(to: &fbo) { fboPtr in
-            withUnsafeMutablePointer(to: &flipY) { flipPtr in
-                var params: [mpv_render_param] = [
-                    mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_FBO, data: UnsafeMutableRawPointer(fboPtr)),
-                    mpv_render_param(type: MPV_RENDER_PARAM_FLIP_Y, data: UnsafeMutableRawPointer(flipPtr)),
-                    mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil)
-                ]
-                mpv_render_context_render(renderContext, &params)
-            }
+    private func setupNotificationObservers(viewId: ObjectIdentifier) {
+        // Observe notifications from the callback context
+        // These run on main thread since we're adding them from main thread
+        let displayObserver = NotificationCenter.default.addObserver(
+            forName: .mpvNeedsDisplay, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let info = notification.userInfo,
+                  let notifViewId = info["viewId"] as? ObjectIdentifier,
+                  notifViewId == viewId else { return }
+            self?.display()
         }
 
-        context.flushBuffer()
+        let posObserver = NotificationCenter.default.addObserver(
+            forName: .mpvPositionChanged, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let info = notification.userInfo,
+                  let notifViewId = info["viewId"] as? ObjectIdentifier,
+                  notifViewId == viewId,
+                  let value = info["value"] as? Double else { return }
+            self?.onPositionChanged?(value)
+        }
+
+        let durObserver = NotificationCenter.default.addObserver(
+            forName: .mpvDurationChanged, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let info = notification.userInfo,
+                  let notifViewId = info["viewId"] as? ObjectIdentifier,
+                  notifViewId == viewId,
+                  let value = info["value"] as? Double else { return }
+            self?.onDurationChanged?(value)
+        }
+
+        let pauseObserver = NotificationCenter.default.addObserver(
+            forName: .mpvPausedChanged, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let info = notification.userInfo,
+                  let notifViewId = info["viewId"] as? ObjectIdentifier,
+                  notifViewId == viewId,
+                  let value = info["value"] as? Bool else { return }
+            self?.onPausedChanged?(value)
+        }
+
+        let endObserver = NotificationCenter.default.addObserver(
+            forName: .mpvPlaybackEnded, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let info = notification.userInfo,
+                  let notifViewId = info["viewId"] as? ObjectIdentifier,
+                  notifViewId == viewId else { return }
+            self?.onPlaybackEnded?()
+        }
+
+        notificationObservers = [displayObserver, posObserver, durObserver, pauseObserver, endObserver]
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        render()
-    }
+        guard let mpvGL = mpvGL else { return }
 
-    override func reshape() {
-        super.reshape()
-        needsDisplay = true
+        // Clear background
+        glClearColor(0, 0, 0, 0)
+        glClear(UInt32(GL_COLOR_BUFFER_BIT))
+
+        glGetIntegerv(UInt32(GL_FRAMEBUFFER_BINDING), &defaultFBO)
+
+        var dims: [GLint] = [0, 0, 0, 0]
+        glGetIntegerv(GLenum(GL_VIEWPORT), &dims)
+
+        var fbo = mpv_opengl_fbo(
+            fbo: Int32(defaultFBO),
+            w: Int32(dims[2]),
+            h: Int32(dims[3]),
+            internal_format: 0
+        )
+
+        var flip: CInt = 1
+        withUnsafeMutablePointer(to: &flip) { flipPtr in
+            withUnsafeMutablePointer(to: &fbo) { fboPtr in
+                var params = [
+                    mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_FBO, data: fboPtr),
+                    mpv_render_param(type: MPV_RENDER_PARAM_FLIP_Y, data: flipPtr),
+                    mpv_render_param()
+                ]
+                mpv_render_context_render(mpvGL, &params)
+            }
+        }
+
+        openGLContext?.flushBuffer()
     }
 
     // MARK: - Playback Control
 
     func loadFile(_ url: URL) {
         guard let mpv = mpv else {
-            mpvLog("loadFile called but mpv is nil")
+            mpvLog("loadFile: mpv not ready")
             return
         }
-        let path = url.path
-        mpvLog("Loading file: \(path)")
 
-        // Build command: loadfile <path> replace
-        path.withCString { pathPtr in
-            "replace".withCString { replacePtr in
-                "loadfile".withCString { cmdPtr in
-                    var args: [UnsafePointer<CChar>?] = [cmdPtr, pathPtr, replacePtr, nil]
-                    let result = mpv_command(mpv, &args)
-                    if result < 0 {
-                        mpvLog("loadfile failed: \(String(cString: mpv_error_string(result)))")
-                    } else {
-                        mpvLog("loadfile command sent successfully")
-                    }
-                }
-            }
-        }
+        mpvLog("Loading file: \(url.path)")
+        command("loadfile", args: [url.absoluteString, "replace"])
     }
 
     func play() {
-        guard let mpv = mpv else { return }
-        var flag: Int32 = 0
-        mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
+        setFlag("pause", false)
     }
 
     func pause() {
-        guard let mpv = mpv else { return }
-        var flag: Int32 = 1
-        mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
+        setFlag("pause", true)
     }
 
     func togglePause() {
-        guard let mpv = mpv else { return }
-
-        "cycle".withCString { cmdPtr in
-            "pause".withCString { pausePtr in
-                var args: [UnsafePointer<CChar>?] = [cmdPtr, pausePtr, nil]
-                mpv_command(mpv, &args)
-            }
-        }
+        command("cycle", args: ["pause"])
     }
 
     func seek(to time: TimeInterval) {
-        guard let mpv = mpv else { return }
-        let timeStr = String(format: "%.2f", time)
-
-        "seek".withCString { cmdPtr in
-            timeStr.withCString { timePtr in
-                "absolute".withCString { absPtr in
-                    var args: [UnsafePointer<CChar>?] = [cmdPtr, timePtr, absPtr, nil]
-                    mpv_command(mpv, &args)
-                }
-            }
-        }
+        command("seek", args: [String(format: "%.2f", time), "absolute"])
     }
 
     func seekRelative(_ seconds: Double) {
-        guard let mpv = mpv else { return }
-        let secStr = String(format: "%.2f", seconds)
-
-        "seek".withCString { cmdPtr in
-            secStr.withCString { secPtr in
-                "relative".withCString { relPtr in
-                    var args: [UnsafePointer<CChar>?] = [cmdPtr, secPtr, relPtr, nil]
-                    mpv_command(mpv, &args)
-                }
-            }
-        }
+        command("seek", args: [String(format: "%.2f", seconds), "relative"])
     }
 
     func getPosition() -> TimeInterval {
@@ -378,31 +394,60 @@ final class MpvOpenGLView: NSOpenGLView {
         return paused != 0
     }
 
+    private func setFlag(_ name: String, _ flag: Bool) {
+        guard let mpv = mpv else { return }
+        var data: Int = flag ? 1 : 0
+        mpv_set_property(mpv, name, MPV_FORMAT_FLAG, &data)
+    }
+
+    private func command(_ command: String, args: [String] = []) {
+        guard let mpv = mpv else { return }
+
+        var cargs = [command] + args + [nil as String?]
+        var cstrs = cargs.map { $0.flatMap { strdup($0) } }
+        defer {
+            for ptr in cstrs where ptr != nil {
+                free(ptr)
+            }
+        }
+
+        var ptrs = cstrs.map { $0.map { UnsafePointer($0) } }
+        let result = mpv_command(mpv, &ptrs)
+        if result < 0 {
+            mpvLog("Command '\(command)' failed: \(String(cString: mpv_error_string(result)))")
+        }
+    }
+
     // MARK: - Cleanup
 
     func shutdown() {
-        guard !isShuttingDown else { return }
-        isShuttingDown = true
+        mpvLog("Shutting down mpv...")
 
-        if let displayLink = displayLink {
-            CVDisplayLinkStop(displayLink)
-            self.displayLink = nil
+        // Remove notification observers
+        for observer in notificationObservers {
+            NotificationCenter.default.removeObserver(observer)
         }
+        notificationObservers = []
 
-        if let renderContext = mpvRenderContext {
-            mpv_render_context_free(renderContext)
-            mpvRenderContext = nil
+        // Clear callback context first to stop callbacks
+        callbackContext = nil
+
+        if let mpvGL = mpvGL {
+            mpv_render_context_free(mpvGL)
+            self.mpvGL = nil
         }
 
         if let mpv = mpv {
             mpv_terminate_destroy(mpv)
             self.mpv = nil
         }
+
+        mpvLog("mpv shutdown complete")
     }
 
-    private func checkError(_ status: Int32) {
+    private func checkError(_ status: CInt) {
         if status < 0 {
-            print("mpv error: \(String(cString: mpv_error_string(status)))")
+            mpvLog("MPV error: \(String(cString: mpv_error_string(status)))")
         }
     }
 }
@@ -418,58 +463,54 @@ struct MpvPlayerView: NSViewRepresentable {
     var onSeek: ((TimeInterval) -> Void)?
     var onCoordinatorReady: ((Coordinator) -> Void)?
 
-    @MainActor
     func makeNSView(context: Context) -> MpvOpenGLView {
         mpvLog("makeNSView called")
         let view = MpvOpenGLView(frame: .zero, pixelFormat: nil)!
 
         view.onPositionChanged = { position in
-            currentTime = position
+            DispatchQueue.main.async {
+                currentTime = position
+            }
         }
 
         view.onDurationChanged = { dur in
-            duration = dur
+            DispatchQueue.main.async {
+                duration = dur
+            }
         }
 
         view.onPausedChanged = { paused in
-            isPlaying = !paused
+            DispatchQueue.main.async {
+                isPlaying = !paused
+            }
         }
 
         context.coordinator.view = view
-
-        // Notify that coordinator is ready
         onCoordinatorReady?(context.coordinator)
 
-        // Track initial URL
-        if let url = url {
-            context.coordinator.lastURL = url
-            mpvLog("Initial URL set: \(url.lastPathComponent)")
-        }
-
-        // Setup immediately
-        mpvLog("Calling setup...")
-        view.setup()
-        mpvLog("Setup returned")
+        // Setup mpv
+        view.setupContext()
+        view.setupMpv()
 
         // Load file if we have one
-        if let url = context.coordinator.lastURL {
-            mpvLog("Loading initial file...")
+        if let url = url {
+            context.coordinator.lastURL = url
+            mpvLog("Loading initial file: \(url.lastPathComponent)")
             view.loadFile(url)
         }
 
         return view
     }
 
-    @MainActor
     func updateNSView(_ nsView: MpvOpenGLView, context: Context) {
-        // Load file when URL changes (only after setup is complete)
+        // Load file when URL changes
         if nsView.isSetupComplete, let url = url, context.coordinator.lastURL != url {
             context.coordinator.lastURL = url
+            mpvLog("updateNSView: Loading file \(url.lastPathComponent)")
             nsView.loadFile(url)
         }
     }
 
-    @MainActor
     static func dismantleNSView(_ nsView: MpvOpenGLView, coordinator: Coordinator) {
         nsView.shutdown()
     }
@@ -478,7 +519,6 @@ struct MpvPlayerView: NSViewRepresentable {
         Coordinator()
     }
 
-    @MainActor
     class Coordinator {
         var view: MpvOpenGLView?
         var lastURL: URL?

@@ -37,7 +37,7 @@ class CastingViewModel: ObservableObject {
     }
     @Published var isSwitchingOutput = false
     @Published var statusMessage: String = "Drop a video file to start"
-    @Published var useEmbeddedPlayer: Bool = false  // Embedded mpv disabled - needs OpenGL debugging
+    @Published var useEmbeddedPlayer: Bool = false  // Disabled - crashes during window activation
 
     // Embedded player state (for MpvPlayerView binding)
     @Published var embeddedIsPlaying: Bool = false
