@@ -781,19 +781,19 @@ final class TermKitTranscoderUI {
             options.append(contentsOf: currentDevices)
             let labels: [String] = options.map { device in
                 if let device {
-                    // Checkmark shows CONFIGURED device, not currently playing device
-                    let isActive = (device.name == self.selectedChromecastName)
-                    let prefix = isActive ? "✓ " : "  "
-                    return "\(prefix)📺 \(device.name)"
+                    return "📺 \(device.name)"
                 } else {
-                    // "None" is checked when no device is configured
-                    let isActive = (self.selectedChromecastName == nil)
-                    let prefix = isActive ? "✓ " : "  "
-                    return "\(prefix)🚫 None (disable Chromecast)"
+                    return "🚫 None (disable Chromecast)"
                 }
             }
-            // Default selection: active item if present, else first.
-            let activeIndex = labels.firstIndex(where: { $0.hasPrefix("✓") }) ?? 0
+            // Default selection: configured device if present, else first.
+            let activeIndex = options.firstIndex(where: { device in
+                if let device {
+                    return device.name == self.selectedChromecastName
+                } else {
+                    return self.selectedChromecastName == nil
+                }
+            }) ?? 0
             return (options, labels, activeIndex)
         }
 
