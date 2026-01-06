@@ -73,13 +73,9 @@ public final class ChromecastPlayer: Player {
         let status = try currentStatus()
         try commandSender("PAUSE", status.mediaSessionId, [:])
 
-        // Validate pause completed
-        let validated = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
+        // Validate pause completed (silent - TUI drift detection will catch issues)
+        _ = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
             updatedStatus.playerState == .paused
-        }
-
-        if !validated {
-            print("[ChromecastPlayer] Warning: Pause not confirmed within 3s")
         }
     }
 
@@ -87,13 +83,9 @@ public final class ChromecastPlayer: Player {
         let status = try currentStatus()
         try commandSender("PLAY", status.mediaSessionId, [:])
 
-        // Validate resume completed
-        let validated = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
+        // Validate resume completed (silent - TUI drift detection will catch issues)
+        _ = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
             updatedStatus.playerState == .playing
-        }
-
-        if !validated {
-            print("[ChromecastPlayer] Warning: Resume not confirmed within 3s")
         }
     }
 
@@ -101,14 +93,10 @@ public final class ChromecastPlayer: Player {
         let status = try currentStatus()
         try commandSender("SEEK", status.mediaSessionId, ["currentTime": time])
 
-        // Validate seek completed (within ±2s tolerance)
-        let validated = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
+        // Validate seek completed (silent - TUI drift detection will catch issues)
+        // Tolerance: ±2s, timeout: 3s
+        _ = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
             abs(updatedStatus.currentTime - time) < 2.0
-        }
-
-        if !validated {
-            // Log warning but don't fail - seek was sent, just not confirmed
-            print("[ChromecastPlayer] Warning: Seek to \(time)s not confirmed within 3s")
         }
     }
 
