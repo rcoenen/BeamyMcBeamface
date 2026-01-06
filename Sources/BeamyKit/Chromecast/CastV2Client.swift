@@ -9,7 +9,14 @@ public final class CastV2Client: @unchecked Sendable {
     private var transportId: String?
     private var sessionId: String?
     private var mediaSessionId: Int?
-    public private(set) var latestMediaStatus: MediaStatus?
+
+    // Thread-safe media status access
+    private let statusQueue = DispatchQueue(label: "com.beamy.chromecast.status", qos: .userInitiated)
+    private var _latestMediaStatus: MediaStatus?
+    public var latestMediaStatus: MediaStatus? {
+        get { statusQueue.sync { _latestMediaStatus } }
+    }
+
     private var requestId: Int = 0
     private let verbose: Bool
     private let logURL = URL(fileURLWithPath: "/tmp/beamy-cast.log")
@@ -110,9 +117,6 @@ public final class CastV2Client: @unchecked Sendable {
             payload: ["type": "CONNECT"]
         )
 
-        // Small delay for connection to establish
-        Thread.sleep(forTimeInterval: 0.5)
-
         log("Connected to Chromecast!")
     }
 
@@ -152,7 +156,6 @@ public final class CastV2Client: @unchecked Sendable {
             payload: ["type": "CONNECT"]
         )
 
-        Thread.sleep(forTimeInterval: 0.5)
         log("Media receiver ready")
     }
 
@@ -212,8 +215,7 @@ public final class CastV2Client: @unchecked Sendable {
             payload: payload
         )
 
-        log("LOAD message sent, waiting for playback...")
-        Thread.sleep(forTimeInterval: 1)
+        log("LOAD message sent")
     }
 
     /// Send a media control command (PLAY, PAUSE, SEEK) to the active session.
@@ -483,7 +485,7 @@ public final class CastV2Client: @unchecked Sendable {
                     if let parsedStatus = MediaStatus(dictionary: status) {
                         log("Updated media status: session \(parsedStatus.mediaSessionId), state \(parsedStatus.playerState.rawValue), currentTime \(parsedStatus.currentTime), duration \(parsedStatus.duration)")
                         self.mediaSessionId = parsedStatus.mediaSessionId
-                        self.latestMediaStatus = parsedStatus
+                        self.statusQueue.sync { self._latestMediaStatus = parsedStatus }
                     } else if let newMediaSessionId = (status["mediaSessionId"] as? NSNumber)?.intValue {
                         log("Got media session ID: \(newMediaSessionId)")
                         self.mediaSessionId = newMediaSessionId
