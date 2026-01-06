@@ -1,6 +1,7 @@
 import Foundation
 import BeamyKit
 @preconcurrency import TermKit
+import Darwin
 
 /// A TermKit-based UI for controlling playback via the Player abstraction.
 /// Keeps the existing CLI flags; opt-in via `--termkit` in TranscodeTest.
@@ -66,6 +67,7 @@ final class TermKitTranscoderUI {
     // Position polling state
     private var lastPositionPollTime: Date?
     private var lastSeekTime: Date?
+    private var chromecastSeekOffset: TimeInterval = 0  // Track seek position for Chromecast
 
     init(
         server: TranscodeServer,
@@ -105,6 +107,32 @@ final class TermKitTranscoderUI {
         let top = PlayerToplevel()
         top.fill()
         self.toplevel = top
+
+        // Track terminal size for resize detection
+        var initialWs = winsize()
+        _ = ioctl(STDOUT_FILENO, TIOCGWINSZ, &initialWs)
+        var lastTermSize = (cols: Int(initialWs.ws_col), rows: Int(initialWs.ws_row))
+
+        // Poll for terminal resize every 100ms (TermKit's KEY_RESIZE is laggy)
+        let resizeTimer = DispatchSource.makeTimerSource(queue: .main)
+        resizeTimer.schedule(deadline: .now(), repeating: .milliseconds(16))  // 60fps for responsive resize
+        resizeTimer.setEventHandler { [weak top] in
+            guard let top = top else { return }
+            var ws = winsize()
+            guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 else { return }
+            let newCols = Int(ws.ws_col)
+            let newRows = Int(ws.ws_row)
+            if newCols != lastTermSize.cols || newRows != lastTermSize.rows {
+                lastTermSize = (newCols, newRows)
+                // Update ncurses internal state
+                resizeterm(Int32(newRows), Int32(newCols))
+                // Manually update toplevel frame and relayout
+                top.frame = Rect(x: 0, y: 0, width: newCols, height: newRows)
+                try? top.layoutSubviews()
+                Application.refresh()
+            }
+        }
+        resizeTimer.resume()
 
         let window = Window("Beamy Player (TermKit)")
         window.x = Pos.at(0)
@@ -312,12 +340,17 @@ final class TermKitTranscoderUI {
                 statusLabel?.text = "Status: idle (choose output, press Play)"
                 timeLabel?.text = "Time: \(self.formatTime(self.lastKnownPosition)) / \(self.formatTime(self.duration))"
                 percentLabel?.text = "Progress: 0%"
-                barLabel.text = self.makeBarText(position: self.lastKnownPosition)
+                barLabel.text = self.makeBarText(position: self.lastKnownPosition, labelWidth: barLabel.frame.width)
                 return
             }
 
             let position: TimeInterval
-            if let p = try? player.getPosition() {
+            // For Chromecast LIVE streams, player reports position relative to stream start (0, 1, 2...)
+            // not absolute source file position. Combine our tracked seek offset + player elapsed time.
+            if player is ChromecastPlayer, let playerTime = try? player.getPosition() {
+                position = self.chromecastSeekOffset + playerTime
+                self.lastKnownPosition = position
+            } else if let p = try? player.getPosition() {
                 position = p
                 self.lastKnownPosition = p
             } else if let mpv = player as? MpvPlayer {
@@ -354,7 +387,7 @@ final class TermKitTranscoderUI {
             statusLabel?.text = "Status: \(paused ? "paused" : "playing") via \(outputName)"
             timeLabel?.text = "Time: \(self.formatTime(position)) / \(self.formatTime(self.duration))"
             percentLabel?.text = "Progress: \(Int(round(percent)))%"
-            barLabel.text = self.makeBarText(position: position)
+            barLabel.text = self.makeBarText(position: position, labelWidth: barLabel.frame.width)
         }
         self.timer = timer
         timer.resume()
@@ -474,21 +507,19 @@ final class TermKitTranscoderUI {
         let client = CastV2Client(device: device, verbose: true)
         try client.connect()
         try client.launchDefaultMediaReceiver()
-        try client.loadMedia(url: server.url, contentType: "video/x-matroska", title: title, isLive: true)
-        let player = ChromecastPlayer(client: client)
+
+        // For LIVE streams, we must seek server BEFORE loading (SEEK command doesn't work)
         if lastKnownPosition > 0 {
-            try? player.seek(to: lastKnownPosition)
-        }
-        if lastKnownPaused {
-            try? player.pause()
+            server.seek(to: lastKnownPosition, awaitClientReconnect: false)
+            chromecastSeekOffset = lastKnownPosition
+        } else {
+            chromecastSeekOffset = 0
         }
 
-        // Validate position after output switch
-        if lastKnownPosition > 0, let actualPosition = try? player.getPosition() {
-            let drift = abs(actualPosition - lastKnownPosition)
-            if drift > 2.0 {
-                log("Position drift after switch to Chromecast: expected \(lastKnownPosition)s, got \(actualPosition)s (drift: \(drift)s)")
-            }
+        try client.loadMedia(url: server.url, contentType: "video/x-matroska", title: title, isLive: true)
+        let player = ChromecastPlayer(client: client)
+        if lastKnownPaused {
+            try? player.pause()
         }
 
         return PlayerHandle(output: .chromecast, player: player, cleanup: {
@@ -915,6 +946,7 @@ final class TermKitTranscoderUI {
             // For Chromecast, we need to reload the stream at new position
             // because LIVE streams don't support seeking
             if let chromecastPlayer = player as? ChromecastPlayer {
+                chromecastSeekOffset = target  // Track offset for position calculation
                 server.seek(to: target, awaitClientReconnect: true)
                 try chromecastPlayer.reload(url: server.url)
             } else {
@@ -938,6 +970,7 @@ final class TermKitTranscoderUI {
             // For Chromecast, we need to reload the stream at new position
             // because LIVE streams don't support seeking
             if let chromecastPlayer = player as? ChromecastPlayer {
+                chromecastSeekOffset = clamped  // Track offset for position calculation
                 server.seek(to: clamped, awaitClientReconnect: true)
                 try chromecastPlayer.reload(url: server.url)
             } else {
@@ -1004,15 +1037,15 @@ final class TermKitTranscoderUI {
         seekTo(target, statusLabel: statusLabel)
     }
 
-    private func makeBarText(position: TimeInterval) -> String {
+    private func makeBarText(position: TimeInterval, labelWidth: Int) -> String {
         let total = duration > 0 ? duration : 1
-        // Compute bar width relative to the current toplevel width to avoid clipping.
-        let totalColumns = max(20, Int(toplevel?.bounds.width ?? 80) - 2)  // subtract window border
+        // Use actual label width for proper fit
+        let totalColumns = max(20, labelWidth)
         let clamped = max(0, min(position, total))
         let fraction = clamped / total
         let prefix = formatTime(clamped)
         let suffix = formatTime(duration)
-        // 4 extra chars: " [", "] " around the bar plus one space before suffix.
+        // 4 extra chars: " [", "] " around the bar
         let fixed = prefix.count + suffix.count + 4
         let barWidth = max(5, min(100, totalColumns - fixed))
         let knobIndex = min(barWidth - 1, max(0, Int(Double(barWidth) * fraction)))
