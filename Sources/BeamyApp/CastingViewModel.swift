@@ -187,16 +187,24 @@ class CastingViewModel: ObservableObject {
         }
 
         stopPlayback()
-        currentFile = url
         errorMessage = nil
 
         // Check if AVPlayer can play this format (for embedded playback)
         if useEmbeddedPlayer && outputType == .mpv {
-            if AVPlayerView.canPlay(url: url) {
+            let canPlay = AVPlayerView.canPlay(url: url)
+            print("DEBUG: File extension: \(url.pathExtension)")
+            print("DEBUG: Can AVPlayer play? \(canPlay)")
+            print("DEBUG: File URL: \(url)")
+
+            if canPlay {
                 // AVPlayer supports this format - play embedded
+                currentFile = url
                 statusMessage = "Playing embedded"
+                print("DEBUG: Starting embedded playback")
             } else {
                 // Unsupported format - fall back to external mpv
+                // Don't set currentFile so drop zone remains visible
+                print("DEBUG: Format not supported, launching external mpv")
                 do {
                     let controller = MpvController()
                     _ = try controller.launch(url: url, windowTitle: "Beamy Player")
@@ -207,6 +215,9 @@ class CastingViewModel: ObservableObject {
             }
             return
         }
+
+        // For non-embedded playback (Chromecast or disabled embedded)
+        currentFile = url
 
         // Get media info for duration (needed for transcoded playback)
         do {
