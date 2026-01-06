@@ -8,36 +8,25 @@ struct AVPlayerView: View {
     @Binding var currentTime: TimeInterval
     @Binding var duration: TimeInterval
 
-    @State private var player: AVPlayer?
+    @State private var player: AVPlayer = AVPlayer()
     @State private var timeObserver: Any?
     @State private var isSeeking = false
 
     var body: some View {
-        Group {
-            if let player = player {
-                VideoPlayer(player: player)
-                    .onAppear { setupPlayer() }
-                    .onDisappear { cleanup() }
-            } else {
-                Color.black
-                    .overlay(
-                        Text("No video loaded")
-                            .foregroundColor(.white)
-                    )
-                    .onAppear { setupPlayer() }
-            }
-        }
-        .onChange(of: url) { _ in setupPlayer() }
-        .onChange(of: isPlaying) { newValue in syncPlaybackState(newValue) }
-        .onChange(of: currentTime) { newValue in
-            // Only seek if the change is significant (user drag vs time observer)
-            if let player = player, !isSeeking {
-                let playerTime = CMTimeGetSeconds(player.currentTime())
-                if abs(newValue - playerTime) > 1.0 {
-                    handleExternalSeek(to: newValue)
+        VideoPlayer(player: player)
+            .onAppear { setupPlayer() }
+            .onDisappear { cleanup() }
+            .onChange(of: url) { _ in setupPlayer() }
+            .onChange(of: isPlaying) { newValue in syncPlaybackState(newValue) }
+            .onChange(of: currentTime) { newValue in
+                // Only seek if the change is significant (user drag vs time observer)
+                if !isSeeking {
+                    let playerTime = CMTimeGetSeconds(player.currentTime())
+                    if abs(newValue - playerTime) > 1.0 {
+                        handleExternalSeek(to: newValue)
+                    }
                 }
             }
-        }
     }
 
     // MARK: - Format Detection
@@ -59,21 +48,25 @@ struct AVPlayerView: View {
         cleanup()
 
         guard let url = url else {
-            player = nil
+            player.replaceCurrentItem(with: nil)
             return
         }
 
+        // Start accessing security-scoped resource (for sandboxed apps)
+        let accessing = url.startAccessingSecurityScopedResource()
+
+        // Create player item and replace current item
         let playerItem = AVPlayerItem(url: url)
-        let newPlayer = AVPlayer(playerItem: playerItem)
+        player.replaceCurrentItem(with: playerItem)
 
         // Set up time observer (fires every 0.25 seconds)
         let interval = CMTime(seconds: 0.25, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        let observer = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
-            Task { @MainActor in
+        let observer = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak player] time in
+            DispatchQueue.main.async {
                 self.currentTime = time.seconds
 
                 // Update duration when available
-                if let item = newPlayer.currentItem {
+                if let item = player?.currentItem {
                     let itemDuration = item.duration.seconds
                     if itemDuration.isFinite && itemDuration > 0 {
                         self.duration = itemDuration
@@ -83,27 +76,29 @@ struct AVPlayerView: View {
         }
 
         self.timeObserver = observer
-        self.player = newPlayer
+
+        // Stop accessing security-scoped resource if we started it
+        if accessing {
+            url.stopAccessingSecurityScopedResource()
+        }
 
         // Auto-play if isPlaying is true
         if isPlaying {
-            newPlayer.play()
+            player.play()
         }
     }
 
     private func cleanup() {
-        if let observer = timeObserver, let player = player {
+        if let observer = timeObserver {
             player.removeTimeObserver(observer)
             timeObserver = nil
         }
 
-        player?.pause()
-        player = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
     }
 
     private func syncPlaybackState(_ shouldPlay: Bool) {
-        guard let player = player else { return }
-
         if shouldPlay {
             player.play()
         } else {
@@ -112,8 +107,6 @@ struct AVPlayerView: View {
     }
 
     private func handleExternalSeek(to time: TimeInterval) {
-        guard let player = player else { return }
-
         isSeeking = true
         let cmTime = CMTime(seconds: time, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         player.seek(to: cmTime) { _ in
