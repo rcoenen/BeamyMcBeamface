@@ -1,35 +1,71 @@
 import SwiftUI
 import BeamyKit
-import AVKit
-import WebKit
 import Combine
+
+// MARK: - Output Type
+
+enum OutputType: String, CaseIterable {
+    case mpv = "mpv"
+    case chromecast = "chromecast"
+}
+
+// MARK: - Player Handle
+
+private struct PlayerHandle {
+    let output: OutputType
+    let player: Player
+    let cleanup: () -> Void
+}
+
+// MARK: - CastingViewModel
 
 @MainActor
 class CastingViewModel: ObservableObject {
+    // MARK: Published State
+
     @Published var devices: [ChromecastDevice] = []
     @Published var selectedDevice: ChromecastDevice? {
-        didSet {
-            saveSelectedDevice()
-        }
+        didSet { saveSelectedDevice() }
     }
     @Published var currentFile: URL?
     @Published var mediaInfo: MediaInfo?
     @Published var duration: TimeInterval = 0
-    @Published var isCasting = false
     @Published var isDiscovering = false
     @Published var errorMessage: String?
+    @Published var outputType: OutputType = .mpv {
+        didSet { saveOutputType() }
+    }
+    @Published var isSwitchingOutput = false
+    @Published var statusMessage: String = "Drop a video file to start"
 
-    private var caster: Caster?
+    // MARK: Internal State
+
     var transcodeServer: TranscodeServer?
+    private var playerHandle: PlayerHandle?
+    private var positionTimer: Timer?
     private var isLoadingConfig = false
 
-    // Computed properties that query server state (single source of truth)
+    // Position tracking (like TUI)
+    private var lastKnownPosition: TimeInterval = 0
+    private var lastKnownPaused: Bool = true
+    private var chromecastSeekOffset: TimeInterval = 0
+
+    // MARK: Computed Properties (query Player, not TranscodeServer)
+
     var isPlaying: Bool {
-        !(transcodeServer?.isPaused ?? true)
+        guard let player = playerHandle?.player else { return false }
+        return !((try? player.isPaused()) ?? true)
     }
 
     var currentTime: TimeInterval {
-        transcodeServer?.currentPosition ?? 0
+        guard let player = playerHandle?.player else { return lastKnownPosition }
+
+        // For Chromecast LIVE streams, add seek offset (like TUI)
+        if player is ChromecastPlayer, let playerTime = try? player.getPosition() {
+            return chromecastSeekOffset + playerTime
+        }
+
+        return (try? player.getPosition()) ?? lastKnownPosition
     }
 
     var progress: Double {
@@ -40,11 +76,33 @@ class CastingViewModel: ObservableObject {
         max(0, duration - currentTime)
     }
 
+    var hasPlayer: Bool {
+        playerHandle != nil
+    }
+
+    // MARK: Initialization
+
     init() {
         isLoadingConfig = true
+        loadConfig()
         discoverDevices()
         isLoadingConfig = false
     }
+
+    private func loadConfig() {
+        guard let config = try? Config.load() else { return }
+
+        // Restore output type
+        if let savedOutput = config.ui.defaultOutput?.lowercased() {
+            switch savedOutput {
+            case "mpv": outputType = .mpv
+            case "chromecast": outputType = .chromecast
+            default: break
+            }
+        }
+    }
+
+    // MARK: Config Persistence
 
     private func saveSelectedDevice() {
         guard !isLoadingConfig else { return }
@@ -52,6 +110,15 @@ class CastingViewModel: ObservableObject {
         config.chromecast.defaultDevice = selectedDevice?.name
         try? config.save()
     }
+
+    private func saveOutputType() {
+        guard !isLoadingConfig else { return }
+        guard var config = try? Config.load() else { return }
+        config.ui.defaultOutput = outputType.rawValue
+        try? config.save()
+    }
+
+    // MARK: Device Discovery
 
     func discoverDevices() {
         guard !isDiscovering else { return }
@@ -68,6 +135,7 @@ class CastingViewModel: ObservableObject {
                     self.devices = videoDevices
                     self.isDiscovering = false
 
+                    // Restore saved device
                     if let defaultName = try? Config.load().chromecast.defaultDevice {
                         self.isLoadingConfig = true
                         self.selectedDevice = videoDevices.first { $0.name == defaultName }
@@ -83,76 +151,50 @@ class CastingViewModel: ObservableObject {
         }
     }
 
-    func handleFileDrop(url: URL) {
-        print("[DROP] File dropped: \(url.path)")
+    // MARK: File Handling (drag-and-drop)
 
+    func handleFileDrop(url: URL) {
         let videoExtensions = ["mp4", "mkv", "webm", "mov", "avi", "m4v"]
         guard videoExtensions.contains(url.pathExtension.lowercased()) else {
-            print("[DROP] Rejected - unsupported extension: \(url.pathExtension)")
             errorMessage = "Unsupported file type. Please drop a video file."
             return
         }
 
-        print("[DROP] Extension OK, stopping preview...")
-        stopPreview()
+        stopPlayback()
         currentFile = url
         errorMessage = nil
 
         // Get media info for duration
-        print("[DROP] Getting media info...")
         do {
             let info = try FFmpeg.getMediaInfo(file: url)
             self.mediaInfo = info
             self.duration = info.duration
-            print("[DROP] Media info OK - duration: \(info.duration)")
         } catch {
-            print("[DROP] Media info FAILED: \(error)")
             errorMessage = "Failed to read media info: \(error.localizedDescription)"
             return
         }
 
-        print("[DROP] Starting transcoder...")
         startTranscoder()
     }
 
     private func startTranscoder() {
-        guard let url = currentFile, let info = mediaInfo else {
-            print("[TRANSCODER] No file or media info!")
-            return
-        }
+        guard let url = currentFile, let info = mediaInfo else { return }
 
         let port = findAvailablePort()
-        print("[TRANSCODER] Using port \(port)")
 
         do {
             let server = try TranscodeServer(input: url, port: port, mediaInfo: info)
             self.transcodeServer = server
-            print("[TRANSCODER] Server started at \(server.url)")
+            statusMessage = "Transcoder ready - select output and press Play"
 
-            // Listen for state changes from server
-            server.onStateChanged = { [weak self] isPaused, position in
-                DispatchQueue.main.async {
-                    // Trigger UI refresh by publishing objectWillChange
-                    self?.objectWillChange.send()
-                }
-            }
-
-            // Keep progress callback for backward compatibility
-            server.onProgress = { [weak self] time in
-                DispatchQueue.main.async {
-                    self?.objectWillChange.send()
-                }
-            }
-
-            print("[TRANSCODER] Ready! Playing at \(server.url)")
+            // Start position polling timer
+            startPositionTimer()
         } catch {
-            print("[TRANSCODER] FAILED: \(error)")
             errorMessage = "Failed to start transcoder: \(error.localizedDescription)"
         }
     }
 
     private func findAvailablePort() -> Int {
-        // Try to find an available port starting from 8080
         for port in 8080..<9000 {
             if isPortAvailable(port) {
                 return port
@@ -180,41 +222,252 @@ class CastingViewModel: ObservableObject {
         return result >= 0
     }
 
+    // MARK: Position Timer (250ms polling like TUI)
+
+    private func startPositionTimer() {
+        positionTimer?.invalidate()
+        positionTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.pollPosition()
+            }
+        }
+    }
+
+    private func pollPosition() {
+        guard let player = playerHandle?.player else {
+            statusMessage = transcodeServer != nil ? "Ready - press Play" : "Drop a video file to start"
+            return
+        }
+
+        // Update position from player
+        if let position = try? player.getPosition() {
+            if player is ChromecastPlayer {
+                lastKnownPosition = chromecastSeekOffset + position
+            } else {
+                lastKnownPosition = position
+            }
+        }
+
+        // Update pause state
+        if let paused = try? player.isPaused() {
+            lastKnownPaused = paused
+        }
+
+        // Update status
+        let outputName = outputType == .mpv ? "mpv" : "Chromecast"
+        statusMessage = lastKnownPaused ? "Paused via \(outputName)" : "Playing via \(outputName)"
+
+        // Trigger UI refresh
+        objectWillChange.send()
+    }
+
+    // MARK: Output Switching
+
+    func switchOutput(to newOutput: OutputType) {
+        guard !isSwitchingOutput else {
+            statusMessage = "Output switch in progress..."
+            return
+        }
+
+        guard transcodeServer != nil else {
+            outputType = newOutput
+            return
+        }
+
+        // If switching to Chromecast but no device selected, don't switch yet
+        if newOutput == .chromecast && selectedDevice == nil {
+            outputType = newOutput
+            statusMessage = "Select a Chromecast device"
+            return
+        }
+
+        isSwitchingOutput = true
+        statusMessage = "Switching output..."
+
+        // Capture current state
+        let position = currentTime
+        let wasPaused = lastKnownPaused
+
+        // Cleanup old player
+        cleanupPlayer()
+
+        // Update output type
+        outputType = newOutput
+
+        // Launch new player
+        Task {
+            do {
+                try await launchPlayer(output: newOutput, seekTo: position, paused: wasPaused)
+                statusMessage = newOutput == .mpv ? "Playing via mpv" : "Playing via Chromecast"
+            } catch {
+                errorMessage = "Failed to switch output: \(error.localizedDescription)"
+                statusMessage = "Output switch failed"
+            }
+            isSwitchingOutput = false
+        }
+    }
+
+    private func launchPlayer(output: OutputType, seekTo position: TimeInterval, paused: Bool) async throws {
+        guard let server = transcodeServer else { return }
+
+        switch output {
+        case .mpv:
+            let handle = try launchMpv(server: server, seekTo: position, paused: paused)
+            playerHandle = handle
+
+        case .chromecast:
+            guard let device = selectedDevice else {
+                throw PlayerError.disconnected
+            }
+            let handle = try await launchChromecast(device: device, server: server, seekTo: position, paused: paused)
+            playerHandle = handle
+        }
+
+        lastKnownPosition = position
+        lastKnownPaused = paused
+    }
+
+    private func launchMpv(server: TranscodeServer, seekTo position: TimeInterval, paused: Bool) throws -> PlayerHandle {
+        let controller = MpvController()
+        _ = try controller.launch(url: server.url, windowTitle: "Beamy Player")
+
+        let player = MpvPlayer(controller: controller, server: server, streamURL: server.url)
+
+        if position > 0 {
+            try? player.seek(to: position)
+        }
+        if paused {
+            try? player.pause()
+        }
+
+        return PlayerHandle(output: .mpv, player: player, cleanup: {
+            controller.quit()
+        })
+    }
+
+    private func launchChromecast(device: ChromecastDevice, server: TranscodeServer, seekTo position: TimeInterval, paused: Bool) async throws -> PlayerHandle {
+        let client = CastV2Client(device: device, verbose: false)
+        try client.connect()
+        try client.launchDefaultMediaReceiver()
+
+        // For LIVE streams, seek server BEFORE loading
+        if position > 0 {
+            server.seek(to: position, awaitClientReconnect: false)
+            chromecastSeekOffset = position
+        } else {
+            chromecastSeekOffset = 0
+        }
+
+        let title = currentFile?.lastPathComponent ?? "Beamy Stream"
+        try client.loadMedia(url: server.url, contentType: "video/x-matroska", title: title, isLive: true)
+
+        let player = ChromecastPlayer(client: client)
+
+        if paused {
+            try? player.pause()
+        }
+
+        return PlayerHandle(output: .chromecast, player: player, cleanup: {
+            client.disconnect()
+        })
+    }
+
+    // MARK: Playback Controls
+
     func togglePlayPause() {
-        transcodeServer?.togglePlayPause()
-    }
+        // If no player, launch one first
+        if playerHandle == nil {
+            guard transcodeServer != nil else { return }
 
-    func play() {
-        transcodeServer?.resume()
-    }
+            // For Chromecast, need device selected
+            if outputType == .chromecast && selectedDevice == nil {
+                statusMessage = "Select a Chromecast device first"
+                return
+            }
 
-    func pause() {
-        transcodeServer?.pause()
+            Task {
+                do {
+                    try await launchPlayer(output: outputType, seekTo: 0, paused: false)
+                } catch {
+                    errorMessage = "Failed to start playback: \(error.localizedDescription)"
+                }
+            }
+            return
+        }
+
+        guard let player = playerHandle?.player else { return }
+
+        do {
+            if lastKnownPaused {
+                try player.resume()
+                lastKnownPaused = false
+            } else {
+                try player.pause()
+                lastKnownPaused = true
+            }
+        } catch {
+            errorMessage = "Playback control error: \(error.localizedDescription)"
+        }
     }
 
     func skipForward() {
-        let newTime = currentTime + 10
-        transcodeServer?.seek(to: newTime)
+        seek(to: currentTime + 10)
     }
 
     func skipBackward() {
-        let newTime = max(0, currentTime - 10)
-        transcodeServer?.seek(to: newTime)
+        seek(to: max(0, currentTime - 10))
     }
 
     func seek(to time: TimeInterval) {
-        transcodeServer?.seek(to: time)
+        let clamped = min(max(0, time), duration)
+
+        guard let player = playerHandle?.player else {
+            lastKnownPosition = clamped
+            return
+        }
+
+        do {
+            // For Chromecast, reload stream at new position (LIVE streams don't support SEEK)
+            if let chromecastPlayer = player as? ChromecastPlayer, let server = transcodeServer {
+                chromecastSeekOffset = clamped
+                server.seek(to: clamped, awaitClientReconnect: true)
+                try chromecastPlayer.reload(url: server.url)
+            } else {
+                try player.seek(to: clamped)
+            }
+            lastKnownPosition = clamped
+        } catch {
+            errorMessage = "Seek error: \(error.localizedDescription)"
+        }
     }
 
     func seekToProgress(_ progress: Double) {
-        let time = progress * duration
-        transcodeServer?.seek(to: time)
+        seek(to: progress * duration)
     }
 
-    func stopPreview() {
+    // MARK: Cleanup
+
+    private func cleanupPlayer() {
+        playerHandle?.cleanup()
+        playerHandle = nil
+    }
+
+    func stopPlayback() {
+        cleanupPlayer()
+        positionTimer?.invalidate()
+        positionTimer = nil
         transcodeServer?.stop()
         transcodeServer = nil
+        lastKnownPosition = 0
+        lastKnownPaused = true
+        chromecastSeekOffset = 0
+        currentFile = nil
+        mediaInfo = nil
+        duration = 0
+        statusMessage = "Drop a video file to start"
     }
+
+    // MARK: Helpers
 
     static func formatTime(_ seconds: TimeInterval) -> String {
         guard seconds.isFinite && !seconds.isNaN else { return "00:00:00" }

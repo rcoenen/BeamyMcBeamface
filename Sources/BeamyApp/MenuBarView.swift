@@ -7,27 +7,39 @@ struct MenuBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Header
-            Text("Beamy McBeamface")
+            Text("Beamy")
                 .font(.headline)
 
             Divider()
 
-            // Device picker
-            if viewModel.devices.isEmpty {
-                HStack {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                    Text("Discovering devices...")
-                        .foregroundColor(.secondary)
-                }
-            } else {
-                Picker("Device", selection: $viewModel.selectedDevice) {
-                    Text("Select device...").tag(nil as ChromecastDevice?)
-                    ForEach(viewModel.devices, id: \.id) { device in
-                        Text(device.name).tag(device as ChromecastDevice?)
+            // Output selector
+            Picker("Output", selection: Binding(
+                get: { viewModel.outputType },
+                set: { viewModel.switchOutput(to: $0) }
+            )) {
+                Text("mpv").tag(OutputType.mpv)
+                Text("Chromecast").tag(OutputType.chromecast)
+            }
+            .pickerStyle(.segmented)
+
+            // Device picker (only for Chromecast)
+            if viewModel.outputType == .chromecast {
+                if viewModel.devices.isEmpty {
+                    HStack {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                        Text("Discovering devices...")
+                            .foregroundColor(.secondary)
                     }
+                } else {
+                    Picker("Device", selection: $viewModel.selectedDevice) {
+                        Text("Select device...").tag(nil as ChromecastDevice?)
+                        ForEach(viewModel.devices, id: \.id) { device in
+                            Text(device.name).tag(device as ChromecastDevice?)
+                        }
+                    }
+                    .pickerStyle(.menu)
                 }
-                .pickerStyle(.menu)
             }
 
             // Current status
@@ -41,12 +53,12 @@ struct MenuBarView: View {
                 }
                 .foregroundColor(.secondary)
 
-                if viewModel.isCasting {
+                if viewModel.hasPlayer {
                     HStack {
-                        Image(systemName: "dot.radiowaves.right")
-                        Text("Casting...")
+                        Image(systemName: viewModel.outputType == .mpv ? "desktopcomputer" : "tv")
+                        Text(viewModel.isPlaying ? "Playing" : "Paused")
                     }
-                    .foregroundColor(.green)
+                    .foregroundColor(viewModel.isPlaying ? .green : .orange)
                 }
             }
 
@@ -59,7 +71,7 @@ struct MenuBarView: View {
 
             Button("Open Main Window") {
                 NSApp.activate(ignoringOtherApps: true)
-                if let window = NSApp.windows.first(where: { $0.title.isEmpty || $0.title == "Beamy McBeamface" }) {
+                if let window = NSApp.windows.first(where: { $0.title.isEmpty || $0.title == "Beamy" }) {
                     window.makeKeyAndOrderFront(nil)
                 }
             }

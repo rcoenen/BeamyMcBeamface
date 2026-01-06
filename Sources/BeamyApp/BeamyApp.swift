@@ -12,9 +12,49 @@ struct BeamyApp: App {
                 .environmentObject(viewModel)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 500, height: 400)
+        .defaultSize(width: 760, height: 480)
         .commands {
-            // Remove standard menus
+            // Playback commands
+            CommandMenu("Playback") {
+                Button("Play/Pause") {
+                    viewModel.togglePlayPause()
+                }
+                .keyboardShortcut(.space, modifiers: [])
+
+                Divider()
+
+                Button("Skip Forward 10s") {
+                    viewModel.skipForward()
+                }
+                .keyboardShortcut(.rightArrow, modifiers: [])
+
+                Button("Skip Backward 10s") {
+                    viewModel.skipBackward()
+                }
+                .keyboardShortcut(.leftArrow, modifiers: [])
+
+                Divider()
+
+                Button("Stop") {
+                    viewModel.stopPlayback()
+                }
+                .keyboardShortcut("s", modifiers: [.command])
+            }
+
+            // Output commands
+            CommandMenu("Output") {
+                Button("Switch to mpv") {
+                    viewModel.switchOutput(to: .mpv)
+                }
+                .keyboardShortcut("1", modifiers: [.command])
+
+                Button("Switch to Chromecast") {
+                    viewModel.switchOutput(to: .chromecast)
+                }
+                .keyboardShortcut("2", modifiers: [.command])
+            }
+
+            // Remove standard menus we don't need
             CommandGroup(replacing: .newItem) { }
             CommandGroup(replacing: .undoRedo) { }
             CommandGroup(replacing: .pasteboard) { }
@@ -25,7 +65,7 @@ struct BeamyApp: App {
         }
 
         // Menu bar extra
-        MenuBarExtra("Beamy McBeamface", systemImage: "tv") {
+        MenuBarExtra("Beamy", systemImage: "tv") {
             MenuBarView()
                 .environmentObject(viewModel)
         }
