@@ -13,8 +13,12 @@ public final class CastV2Client: @unchecked Sendable {
     // Thread-safe media status access
     private let statusQueue = DispatchQueue(label: "com.beamy.chromecast.status", qos: .userInitiated)
     private var _latestMediaStatus: MediaStatus?
+    private var _statusTimestamp: Date?
     public var latestMediaStatus: MediaStatus? {
         get { statusQueue.sync { _latestMediaStatus } }
+    }
+    public var statusTimestamp: Date? {
+        get { statusQueue.sync { _statusTimestamp } }
     }
 
     private var requestId: Int = 0
@@ -262,6 +266,12 @@ public final class CastV2Client: @unchecked Sendable {
         throw lastError ?? CastV2Error.sendFailed("Unknown error")
     }
 
+    /// Request fresh media status from Chromecast.
+    /// Sends GET_STATUS command, which triggers a MEDIA_STATUS response that updates latestMediaStatus.
+    public func requestMediaStatus() throws {
+        try sendMediaCommand(type: "GET_STATUS")
+    }
+
     public func disconnect() {
         log("Disconnecting...")
 
@@ -506,7 +516,10 @@ public final class CastV2Client: @unchecked Sendable {
                     if let parsedStatus = MediaStatus(dictionary: status) {
                         log("Updated media status: session \(parsedStatus.mediaSessionId), state \(parsedStatus.playerState.rawValue), currentTime \(parsedStatus.currentTime), duration \(parsedStatus.duration)")
                         self.mediaSessionId = parsedStatus.mediaSessionId
-                        self.statusQueue.sync { self._latestMediaStatus = parsedStatus }
+                        self.statusQueue.sync {
+                            self._latestMediaStatus = parsedStatus
+                            self._statusTimestamp = Date()
+                        }
                     } else if let newMediaSessionId = (status["mediaSessionId"] as? NSNumber)?.intValue {
                         log("Got media session ID: \(newMediaSessionId)")
                         self.mediaSessionId = newMediaSessionId

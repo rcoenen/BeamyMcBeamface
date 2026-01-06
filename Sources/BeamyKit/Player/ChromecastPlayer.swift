@@ -5,6 +5,8 @@ public final class ChromecastPlayer: Player {
     private let statusProvider: () -> MediaStatus?
     private let commandSender: (String, Int?, [String: Any]) throws -> Void
     private let reloadHandler: (URL) throws -> Void
+    private let statusRequester: () throws -> Void
+    private let timestampProvider: () -> Date?
 
     public init(client: CastV2Client) {
         self.statusProvider = { client.latestMediaStatus }
@@ -14,23 +16,42 @@ public final class ChromecastPlayer: Player {
         self.reloadHandler = { url in
             try client.loadMedia(url: url, contentType: "video/mp2t", isLive: true)
         }
+        self.statusRequester = {
+            try client.requestMediaStatus()
+        }
+        self.timestampProvider = { client.statusTimestamp }
     }
 
     // Internal initializer for testing without network I/O.
     init(
         statusProvider: @escaping () -> MediaStatus?,
         commandSender: @escaping (String, Int?, [String: Any]) throws -> Void,
-        reloadHandler: @escaping (URL) throws -> Void
+        reloadHandler: @escaping (URL) throws -> Void,
+        statusRequester: @escaping () throws -> Void = {},
+        timestampProvider: @escaping () -> Date? = { nil }
     ) {
         self.statusProvider = statusProvider
         self.commandSender = commandSender
         self.reloadHandler = reloadHandler
+        self.statusRequester = statusRequester
+        self.timestampProvider = timestampProvider
     }
 
     public func getPosition() throws -> TimeInterval {
         guard let status = statusProvider() else {
             throw PlayerError.statusUnavailable
         }
+
+        // Interpolate position when playing to provide smoother updates
+        if status.playerState == .playing, let timestamp = timestampProvider() {
+            let elapsed = Date().timeIntervalSince(timestamp)
+            let interpolated = status.currentTime + elapsed
+            let duration = status.duration
+            // Clamp to duration
+            return min(interpolated, duration)
+        }
+
+        // No interpolation when paused or timestamp unavailable
         return status.currentTime
     }
 
@@ -95,6 +116,12 @@ public final class ChromecastPlayer: Player {
         // Reloading uses LOAD on the current media session.
         _ = try currentStatus()
         try reloadHandler(url)
+    }
+
+    /// Request fresh position update from Chromecast.
+    /// Call this periodically during playback to keep latestMediaStatus fresh.
+    public func requestPositionUpdate() throws {
+        try statusRequester()
     }
 
     private func currentStatus() throws -> MediaStatus {

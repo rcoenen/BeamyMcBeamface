@@ -60,6 +60,13 @@ final class TermKitTranscoderUI {
         set { discoveryQueue.sync { _discoveryState = newValue } }
     }
 
+    // Output switching state
+    private var isSwitchingOutput = false
+
+    // Position polling state
+    private var lastPositionPollTime: Date?
+    private var lastSeekTime: Date?
+
     init(
         server: TranscodeServer,
         duration: TimeInterval,
@@ -323,6 +330,25 @@ final class TermKitTranscoderUI {
             let paused = (try? player.isPaused()) ?? self.lastKnownPaused
             self.lastKnownPaused = paused
 
+            // Poll Chromecast for fresh position every 1s during playback
+            if let chromecastPlayer = player as? ChromecastPlayer, !paused {
+                let now = Date()
+                let shouldPoll = self.lastPositionPollTime == nil || now.timeIntervalSince(self.lastPositionPollTime!) >= 1.0
+                if shouldPoll {
+                    try? chromecastPlayer.requestPositionUpdate()
+                    self.lastPositionPollTime = now
+                }
+            }
+
+            // Detect position drift between server and player
+            let serverPosition = self.server.currentPosition
+            let drift = abs(serverPosition - position)
+            // Skip drift detection if seek occurred within last 2s
+            let recentSeek = self.lastSeekTime.map { Date().timeIntervalSince($0) < 2.0 } ?? false
+            if !recentSeek && drift > 3.0 {
+                self.log("Position drift detected: server \(serverPosition)s, player \(position)s (drift: \(drift)s)")
+            }
+
             let percent = self.duration > 0 ? (position / self.duration) * 100 : 0
             let outputName = (self.selectedOutput == .mpv) ? "mpv" : "Chromecast"
             statusLabel?.text = "Status: \(paused ? "paused" : "playing") via \(outputName)"
@@ -429,6 +455,15 @@ final class TermKitTranscoderUI {
         if lastKnownPaused {
             try? player.pause()
         }
+
+        // Validate position after output switch
+        if lastKnownPosition > 0, let actualPosition = try? player.getPosition() {
+            let drift = abs(actualPosition - lastKnownPosition)
+            if drift > 2.0 {
+                log("Position drift after switch to mpv: expected \(lastKnownPosition)s, got \(actualPosition)s (drift: \(drift)s)")
+            }
+        }
+
         return PlayerHandle(output: .mpv, player: player, cleanup: {
             controller.quit()
         })
@@ -447,6 +482,15 @@ final class TermKitTranscoderUI {
         if lastKnownPaused {
             try? player.pause()
         }
+
+        // Validate position after output switch
+        if lastKnownPosition > 0, let actualPosition = try? player.getPosition() {
+            let drift = abs(actualPosition - lastKnownPosition)
+            if drift > 2.0 {
+                log("Position drift after switch to Chromecast: expected \(lastKnownPosition)s, got \(actualPosition)s (drift: \(drift)s)")
+            }
+        }
+
         return PlayerHandle(output: .chromecast, player: player, cleanup: {
             client.disconnect()
         })
@@ -885,6 +929,7 @@ final class TermKitTranscoderUI {
         do {
             try player.seek(to: clamped)
             lastKnownPosition = clamped
+            lastSeekTime = Date()
             statusLabel?.text = "Status: jump to \(formatTime(clamped))"
         } catch {
             statusLabel?.text = "Status: jump error \(error)"
@@ -997,6 +1042,18 @@ final class TermKitTranscoderUI {
     }
 
     private func applyOutputChoice(_ choice: OutputChoice, statusLabel: Label?, forcePicker: Bool = false) {
+        // Prevent concurrent output switches
+        guard !isSwitchingOutput else {
+            log("Output switch already in progress - ignoring request")
+            statusLabel?.text = "Status: switching output..."
+            return
+        }
+
+        isSwitchingOutput = true
+        defer { isSwitchingOutput = false }
+
+        statusLabel?.text = "Status: switching output..."
+
         switch choice {
         case .chromecast:
             if let button = chromecastButton {
@@ -1044,6 +1101,7 @@ final class TermKitTranscoderUI {
             outputRadio?.selected = OutputChoice.mpv.rawValue
             cleanupCurrentPlayer()
             persistDefaultOutput(.mpv)
+            statusLabel?.text = "Status: mpv set"
             // IMPORTANT: Do NOT clear selectedChromecastName - preserve config!
             // Radio label should still show configured device even when playing via mpv
             rebuildOutputRadio(chromecastName: selectedChromecastName, selected: OutputChoice.mpv.rawValue, statusLabel: statusLabel)
