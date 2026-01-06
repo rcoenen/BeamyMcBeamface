@@ -1,76 +1,52 @@
 import Darwin
 import Foundation
 
-/// A simple HTTP server that serves transcoded media content.
-///
-/// Architecture:
-/// - HTTP server accepts client connections and keeps them open
-/// - FFmpeg process is managed separately and can be restarted (for seek)
-/// - On seek: kill FFmpeg, restart at new position, continue streaming to same socket
+/// A simple HTTP server that runs FFmpeg to produce an HLS stream and serves the playlist/segments.
+/// The same stream URL is intended for both embedded AVPlayer and Chromecast.
 public final class TranscodeServer: @unchecked Sendable {
     private let input: URL
     private let port: Int
     private let mediaInfo: MediaInfo
+    private let hlsDirectory: URL
+    private let playlistFilename = "stream.m3u8"
+
     private var serverSocket: Int32 = -1
     private var isRunning = false
     private var ffmpegProcess: Process?
     private var currentSeekPosition: TimeInterval = 0
+    private let ioQueue = DispatchQueue(label: "com.beamy.transcoder.io", qos: .userInitiated)
 
-    // Client socket stored at class level so seek can reuse it
-    private var clientSocket: Int32 = -1
-    private var streamingQueue: DispatchQueue?
-    private var isStreaming = false
-    private var ptsTracker = MpegTsPtsTracker()
-    private var pendingSeekPauseAt: TimeInterval?
-    private var awaitingClientReconnect = false
-
-    // Keep pipes alive at class level to prevent deallocation
-    private var outputPipe: Pipe?
-    private var stderrPipe: Pipe?
-
-    // MARK: - Playback State (Single Source of Truth)
-
-    /// Current pause state - true if FFmpeg is paused (SIGSTOP)
+    /// Current pause state (based on FFmpeg process signals)
     public private(set) var isPaused: Bool = false
 
-    /// Current playback position derived from outgoing stream timestamps (PTS).
+    /// Current playback position derived from FFmpeg progress output.
     public private(set) var currentPosition: TimeInterval = 0
 
     /// Callback for state changes (isPaused, currentPosition)
     public var onStateChanged: ((_ isPaused: Bool, _ position: TimeInterval) -> Void)?
 
-    // Debug logging to file
-    private static let debugLog: FileHandle? = {
-        let logPath = "/tmp/beamy-transcoder-debug.log"
-        FileManager.default.createFile(atPath: logPath, contents: nil)
-        return FileHandle(forWritingAtPath: logPath)
-    }()
-
-    private func log(_ message: String) {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let line = "[\(timestamp)] \(message)\n"
-        if let data = line.data(using: .utf8) {
-            Self.debugLog?.write(data)
-        }
-    }
-
-    /// Callback for progress updates (current time in seconds, source position)
-    public var onProgress: (@Sendable (TimeInterval) -> Void)?
-
     /// Callback for FFmpeg process state changes
     public var onFFmpegStateChanged: ((_ isRunning: Bool) -> Void)?
 
+    /// Callback for progress updates
+    public var onProgress: (@Sendable (TimeInterval) -> Void)?
+
+    /// HLS playlist URL to load in players.
     public var url: URL {
-        URL(string: "http://\(getLocalIPAddress()):\(port)/stream.ts")!
+        URL(string: "http://\(getLocalIPAddress()):\(port)/\(playlistFilename)")!
     }
 
     public init(input: URL, port: Int, mediaInfo: MediaInfo) throws {
         self.input = input
         self.port = port
         self.mediaInfo = mediaInfo
+        self.hlsDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("beamy-hls-\(UUID().uuidString)", isDirectory: true)
         signal(SIGPIPE, SIG_IGN)
         try startServer()
+        startFFmpeg(at: 0)
     }
+
+    // MARK: - Server Lifecycle
 
     private func startServer() throws {
         serverSocket = socket(AF_INET, SOCK_STREAM, 0)
@@ -97,7 +73,7 @@ public final class TranscodeServer: @unchecked Sendable {
             throw TranscodeServerError.bindFailed(port)
         }
 
-        guard listen(serverSocket, 5) >= 0 else {
+        guard listen(serverSocket, 16) >= 0 else {
             close(serverSocket)
             throw TranscodeServerError.listenFailed
         }
@@ -123,301 +99,249 @@ public final class TranscodeServer: @unchecked Sendable {
 
             guard newClientSocket >= 0 else { continue }
 
-            // Store client socket and start streaming
-            handleNewConnection(newClientSocket)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.handleRequest(socket: newClientSocket)
+            }
         }
     }
 
-    private func handleNewConnection(_ socket: Int32) {
-        log("NEW CONNECTION: socket=\(socket), awaitingClientReconnect=\(awaitingClientReconnect)")
-        prepareForNewClient()
+    private func handleRequest(socket: Int32) {
+        defer {
+            shutdown(socket, SHUT_RDWR)
+            close(socket)
+        }
 
-        var noSigPipe: Int32 = 1
-        setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-        log("Client connected on socket \(socket)")
-
-        // Read HTTP request (just consume it)
+        // Read HTTP request
         var buffer = [UInt8](repeating: 0, count: 4096)
-        _ = recv(socket, &buffer, buffer.count, 0)
+        let readBytes = recv(socket, &buffer, buffer.count, 0)
+        guard readBytes > 0 else { return }
 
-        // Send HTTP response headers
-        let headers = """
-        HTTP/1.1 200 OK\r
-        Content-Type: video/x-matroska\r
-        Access-Control-Allow-Origin: *\r
-        Cache-Control: no-cache\r
-        Connection: close\r
-        \r
+        guard let request = String(bytes: buffer.prefix(readBytes), encoding: .utf8) else { return }
+        guard let firstLine = request.split(whereSeparator: \.isNewline).first else { return }
+        let parts = firstLine.split(separator: " ")
+        guard parts.count >= 2 else { return }
+        var path = String(parts[1])
+        if path == "/" { path = "/\(playlistFilename)" }
 
-        """
-        _ = headers.withCString { send(socket, $0, strlen($0), 0) }
-
-        // Store socket and start FFmpeg
-        self.clientSocket = socket
-        self.isStreaming = true
-        self.awaitingClientReconnect = false
-
-        // Create dedicated queue for this streaming session
-        self.streamingQueue = DispatchQueue(label: "com.beamy.streaming", qos: .userInitiated)
-
-        // Start FFmpeg at current seek position
-        log("NEW CONNECTION: Starting FFmpeg at position \(formatTime(currentSeekPosition))")
-        startFFmpeg(at: currentSeekPosition)
-        log("NEW CONNECTION: FFmpeg started, streaming should begin")
-    }
-
-    private func prepareForNewClient() {
-        isStreaming = false
-
-        if clientSocket >= 0 {
-            log("Closing previous client socket \(clientSocket)")
-            shutdown(clientSocket, SHUT_RDWR)
-            close(clientSocket)
-            clientSocket = -1
-        }
-
-        if let process = ffmpegProcess, process.isRunning {
-            log("Killing FFmpeg for new client (pid=\(process.processIdentifier))")
-            // Use SIGKILL instead of terminate() - FFmpeg may be blocked on pipe writes
-            kill(process.processIdentifier, SIGKILL)
-            // Don't wait - just invalidate and move on
-            ffmpegProcess = nil
-            log("FFmpeg killed")
-            notifyFFmpegStateChange(false)
-        }
-    }
-
-    /// Start FFmpeg at the given position and stream to current client socket
-    private func startFFmpeg(at position: TimeInterval) {
-        guard clientSocket >= 0 else {
-            log("No client socket, cannot start FFmpeg")
+        // Basic path sanitization
+        if path.contains("..") {
+            sendResponse(socket: socket, status: "400 Bad Request", headers: [:], body: Data())
             return
         }
 
-        ptsTracker.reset(baseline: position)
-
-        let config = (try? Config.load().ffmpeg) ?? .default
-        let ffmpeg = Process()
-        ffmpeg.executableURL = URL(fileURLWithPath: config.ffmpegPath)
-
-        // Build arguments with seek position and progress reporting
-        var args: [String] = []
-
-        // Seek position (before input for fast seek)
-        if position > 0 {
-            args += ["-ss", String(format: "%.3f", position)]
+        let relativePath = path.drop(while: { $0 == "/" })
+        let fileURL = hlsDirectory.appendingPathComponent(String(relativePath))
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            sendResponse(socket: socket, status: "404 Not Found", headers: [:], body: Data())
+            return
         }
 
-        // Input file
-        args += ["-i", input.path]
-
-        // Offset output timestamps to match source position
-        // (needed because -ss before -i resets timestamps to 0)
-        if position > 0 {
-            args += ["-output_ts_offset", String(format: "%.3f", position)]
+        guard let data = try? Data(contentsOf: fileURL) else {
+            sendResponse(socket: socket, status: "500 Internal Server Error", headers: [:], body: Data())
+            return
         }
 
-        // Progress output to stderr (parsed for position feedback)
-        // Update every 0.5 seconds for smooth UI updates
-        args += ["-progress", "pipe:2", "-stats_period", "0.5"]
+        let contentType: String
+        switch fileURL.pathExtension.lowercased() {
+        case "m3u8":
+            contentType = "application/vnd.apple.mpegurl"
+        case "ts":
+            contentType = "video/mp2t"
+        case "mp4":
+            contentType = "video/mp4"
+        default:
+            contentType = "application/octet-stream"
+        }
 
-        // Video settings
-        args += [
-            "-map", "0:v:0",
-            "-map", "0:a:0?",  // Optional audio
-            "-sn",
-            "-c:v", "libx264",
-            "-profile:v", "baseline",
-            "-level", "3.1",
-            "-preset", config.preset,
-            "-crf", "\(config.crf)",
-            "-g", "30",           // Keyframe every 30 frames (~1 second at 30fps)
-            "-keyint_min", "30",  // Minimum keyframe interval
-            "-sc_threshold", "0", // Disable scene change detection (consistent keyframes)
-        ]
+        sendResponse(
+            socket: socket,
+            status: "200 OK",
+            headers: [
+                "Content-Type": contentType,
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-cache",
+                "Connection": "close",
+                "Content-Length": "\(data.count)"
+            ],
+            body: data
+        )
+    }
 
-        // Audio settings
-        args += [
-            "-c:a", "aac",
-            "-ac", "2",
-            "-ar", "44100",
-            "-b:a", config.audioBitrate,
-        ]
-
-        // Output format - flush immediately to prevent buffering issues
-        // Force keyframe at start for clean seek transitions
-        args += [
-            "-force_key_frames", "expr:eq(n,0)",
-            "-flush_packets", "1",
-            "-fflags", "+flush_packets+genpts",
-            "-f", "matroska",
-            "pipe:1"
-        ]
-
-        ffmpeg.arguments = args
-        log("FFmpeg args: \(args.joined(separator: " "))")
-
-        // Store pipes at class level to prevent deallocation
-        let newOutputPipe = Pipe()
-        let newStderrPipe = Pipe()
-        self.outputPipe = newOutputPipe
-        self.stderrPipe = newStderrPipe
-        ffmpeg.standardOutput = newOutputPipe
-        ffmpeg.standardError = newStderrPipe
-
-        // CRITICAL: Detach FFmpeg from terminal stdin to prevent blocking.
-        // Without this, FFmpeg inherits the parent's terminal stdin. When running
-        // interactively, FFmpeg waits for terminal access before writing to stdout,
-        // causing the stream to hang until a SIGSTOP/SIGCONT cycle "kicks" it.
-        // Setting stdin to /dev/null breaks the terminal association completely.
-        ffmpeg.standardInput = FileHandle.nullDevice
-
-        // Set up handles before starting anything
-        let clientSocket = self.clientSocket
-        let outputHandle = newOutputPipe.fileHandleForReading
-        let stderrHandle = newStderrPipe.fileHandleForReading
-        // Start the reading threads BEFORE FFmpeg to prevent pipe buffer deadlock
-        let streamingStarted = DispatchSemaphore(value: 0)
-        let stderrStarted = DispatchSemaphore(value: 0)
-
-        // Stream video data to client socket - MUST start before FFmpeg
-        Thread.detachNewThread { [weak self] in
-            self?.log("Streaming thread STARTING for position \(position)")
-            streamingStarted.signal()  // Signal that we're ready to read
-            var bytesTotal = 0
-            while self?.isStreaming == true {
-                let data = outputHandle.availableData
-                if data.isEmpty {
-                    self?.log("Streaming thread got EOF after \(bytesTotal) bytes")
-                    break
-                }
-                bytesTotal += data.count
-                if let latestPts = self?.ptsTracker.consume(data) {
-                    self?.updatePositionFromPts(latestPts)
-                }
-                let sent = data.withUnsafeBytes { send(clientSocket, $0.baseAddress, data.count, 0) }
-                if sent < 0 {
-                    self?.log("send() failed after \(bytesTotal) bytes, stopping stream")
-                    self?.isStreaming = false
-                    break
-                }
+    private func sendResponse(socket: Int32, status: String, headers: [String: String], body: Data) {
+        var response = "HTTP/1.1 \(status)\r\n"
+        headers.forEach { key, value in
+            response += "\(key): \(value)\r\n"
+        }
+        response += "\r\n"
+        _ = response.withCString { send(socket, $0, strlen($0), 0) }
+        if !body.isEmpty {
+            body.withUnsafeBytes { ptr in
+                _ = send(socket, ptr.baseAddress, body.count, 0)
             }
-            self?.log("Streaming thread exiting, isStreaming=\(self?.isStreaming ?? false), totalBytes=\(bytesTotal)")
-        }
-
-        // Parse stderr for progress (debug only; not used for currentPosition).
-        Thread.detachNewThread { [weak self] in
-            stderrStarted.signal()  // Signal that we're ready to read
-            var textBuffer = ""
-            // Keep reading while streaming is active
-            while self?.isStreaming == true {
-                let data = stderrHandle.availableData
-                if data.isEmpty {
-                    self?.log("Progress: No data, sleeping...")
-                    usleep(100_000) // Sleep 100ms and retry
-                    continue
-                }
-                if let text = String(data: data, encoding: .utf8) {
-                    textBuffer += text
-                    self?.log("Progress received: \(text)")
-
-                    // Parse out_time=HH:MM:SS.ffffff from -progress output
-                    // out_time is the timestamp of frames being output to ffplay
-                    // With -copyts, this reflects the actual source file position
-                    if let range = textBuffer.range(of: #"out_time=(\d{2}):(\d{2}):(\d{2}\.\d+)"#, options: .regularExpression) {
-                        let timeStr = textBuffer[range].dropFirst(9) // Remove "out_time="
-                        self?.log("Matched time string: \(timeStr)")
-                        let parts = timeStr.split(separator: ":")
-                        if parts.count == 3,
-                           let h = Double(parts[0]),
-                           let m = Double(parts[1]),
-                           let s = Double(parts[2]) {
-                            let position = h * 3600 + m * 60 + s
-                            self?.log("FFmpeg out_time position: \(position)")
-                        }
-                    }
-
-                    // Clear buffer after progress=continue/end line
-                    if textBuffer.contains("progress=") {
-                        textBuffer = ""
-                    }
-                }
-            }
-            self?.log("Progress thread exiting, isStreaming=\(self?.isStreaming ?? false)")
-        }
-
-        // Wait for both reading threads to be ready
-        streamingStarted.wait()
-        stderrStarted.wait()
-
-        // NOW start FFmpeg - readers are already waiting for data
-        do {
-            try ffmpeg.run()
-            self.ffmpegProcess = ffmpeg
-            log("FFmpeg started at position \(formatTime(position))")
-            notifyFFmpegStateChange(true)
-        } catch {
-            log("Failed to start FFmpeg: \(error)")
         }
     }
 
-    private func formatTime(_ seconds: TimeInterval) -> String {
-        let h = Int(seconds) / 3600
-        let m = (Int(seconds) % 3600) / 60
-        let s = Int(seconds) % 60
-        return String(format: "%02d:%02d:%02d", h, m, s)
+    // MARK: - FFmpeg Management
+
+    /// Start FFmpeg at the given position and write HLS output to disk.
+    private func startFFmpeg(at position: TimeInterval) {
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+
+            // Kill any existing process
+            if let process = ffmpegProcess, process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                ffmpegProcess = nil
+                notifyFFmpegStateChange(false)
+            }
+
+            // Reset state
+            currentSeekPosition = position
+            currentPosition = position
+            onStateChanged?(isPaused, currentPosition)
+
+            // Prepare HLS directory
+            try? FileManager.default.removeItem(at: hlsDirectory)
+            try? FileManager.default.createDirectory(at: hlsDirectory, withIntermediateDirectories: true)
+
+            let playlistPath = hlsDirectory.appendingPathComponent(playlistFilename).path
+            let segmentPath = hlsDirectory.appendingPathComponent("segment%05d.ts").path
+
+            let config = (try? Config.load().ffmpeg) ?? .default
+            let ffmpeg = Process()
+            ffmpeg.executableURL = URL(fileURLWithPath: config.ffmpegPath)
+
+            var args: [String] = ["-y"]
+
+            // Seek position (before input for fast seek)
+            if position > 0 {
+                args += ["-ss", String(format: "%.3f", position)]
+            }
+
+            // Input file
+            args += ["-i", input.path]
+
+            // Progress output to stderr (parsed for position feedback)
+            args += ["-progress", "pipe:2", "-stats_period", "0.5"]
+
+            // Video settings
+            args += [
+                "-map", "0:v:0",
+                "-map", "0:a:0?",  // Optional audio
+                "-sn",
+                "-c:v", "libx264",
+                "-profile:v", "baseline",
+                "-level", "3.1",
+                "-preset", config.preset,
+                "-crf", "\(config.crf)",
+                "-g", "30",
+                "-keyint_min", "30",
+                "-sc_threshold", "0",
+            ]
+
+            // Audio settings
+            args += [
+                "-c:a", "aac",
+                "-ac", "2",
+                "-ar", "44100",
+                "-b:a", config.audioBitrate,
+            ]
+
+            // HLS output
+            args += [
+                "-force_key_frames", "expr:gte(t,n_forced*2)",
+                "-hls_time", "2",
+                "-hls_list_size", "6",
+                "-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
+                "-hls_segment_filename", segmentPath,
+                playlistPath
+            ]
+
+            ffmpeg.arguments = args
+
+            // Progress parser
+            let stderrPipe = Pipe()
+            ffmpeg.standardError = stderrPipe
+            ffmpeg.standardOutput = FileHandle.nullDevice
+            ffmpeg.standardInput = FileHandle.nullDevice
+
+            let stderrHandle = stderrPipe.fileHandleForReading
+            Thread.detachNewThread { [weak self] in
+                self?.parseProgress(from: stderrHandle)
+            }
+
+            do {
+                try ffmpeg.run()
+                self.ffmpegProcess = ffmpeg
+                self.isPaused = false
+                self.notifyFFmpegStateChange(true)
+            } catch {
+                self.notifyFFmpegStateChange(false)
+            }
+        }
+    }
+
+    private func parseProgress(from handle: FileHandle) {
+        var buffer = Data()
+        while isRunning {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            buffer.append(chunk)
+
+            while let range = buffer.range(of: Data([0x0A])) { // newline
+                let lineData = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
+                buffer.removeSubrange(buffer.startIndex...range.lowerBound)
+                if let line = String(data: lineData, encoding: .utf8) {
+                    handleProgressLine(line)
+                }
+            }
+        }
+    }
+
+    private func handleProgressLine(_ line: String) {
+        if line.hasPrefix("out_time_ms=") {
+            let value = line.replacingOccurrences(of: "out_time_ms=", with: "")
+            if let ms = Double(value) {
+                let seconds = ms / 1_000_000.0
+                currentPosition = seconds
+                onProgress?(seconds)
+                onStateChanged?(isPaused, seconds)
+            }
+        }
     }
 
     private func notifyFFmpegStateChange(_ isRunning: Bool) {
         onFFmpegStateChanged?(isRunning)
-        log("FFmpeg state changed: isRunning=\(isRunning)")
     }
+
+    // MARK: - Playback Control
 
     public func stop() {
         isRunning = false
-        isStreaming = false
-        ffmpegProcess?.terminate()
-        notifyFFmpegStateChange(false)
-        if clientSocket >= 0 {
-            close(clientSocket)
-            clientSocket = -1
+        if let process = ffmpegProcess, process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
         }
+        ffmpegProcess = nil
+        notifyFFmpegStateChange(false)
         if serverSocket >= 0 {
             close(serverSocket)
             serverSocket = -1
         }
+        try? FileManager.default.removeItem(at: hlsDirectory)
     }
 
     public func pause() {
         guard !isPaused, let process = ffmpegProcess, process.isRunning else { return }
-
         isPaused = true
-        pendingSeekPauseAt = nil
         kill(process.processIdentifier, SIGSTOP)
-
         onStateChanged?(isPaused, currentPosition)
-        log("Paused at \(formatTime(currentPosition))")
     }
 
     public func resume() {
         guard isPaused, let process = ffmpegProcess, process.isRunning else { return }
-
         isPaused = false
-        pendingSeekPauseAt = nil
         kill(process.processIdentifier, SIGCONT)
-
         onStateChanged?(isPaused, currentPosition)
-        log("Resumed at \(formatTime(currentPosition))")
-    }
-
-    private func forcePause() {
-        guard let process = ffmpegProcess, process.isRunning else { return }
-
-        isPaused = true
-        pendingSeekPauseAt = nil
-        kill(process.processIdentifier, SIGSTOP)
-        onStateChanged?(isPaused, currentPosition)
-        log("Paused at \(formatTime(currentPosition))")
     }
 
     /// Toggle between play and pause
@@ -430,63 +354,18 @@ public final class TranscodeServer: @unchecked Sendable {
     }
 
     /// Seek to a new position by restarting FFmpeg
-    /// The HTTP connection stays open - only FFmpeg restarts
     public func seek(to time: TimeInterval) {
         seek(to: time, awaitClientReconnect: false)
     }
 
     public func seek(to time: TimeInterval, awaitClientReconnect: Bool) {
-        log("Seeking to \(formatTime(time))...")
-
-        // Update seek position for FFmpeg -ss argument
-        currentSeekPosition = time
-
-        // Reset currentPosition - will be updated by PTS once packets flow
-        currentPosition = time
-
-        if awaitClientReconnect {
-            log("SEEK: awaitClientReconnect=true, setting up for reconnect")
-            awaitingClientReconnect = true
-            // Don't auto-pause after seek - let video play
-            // pendingSeekPauseAt = time
-            log("SEEK: calling prepareForNewClient()")
-            prepareForNewClient()
-            log("SEEK: prepareForNewClient() returned, waiting for mpv to reconnect...")
-        } else {
-            // Stop current FFmpeg
-            if let process = ffmpegProcess, process.isRunning {
-                log("Killing FFmpeg for seek (pid=\(process.processIdentifier))")
-                kill(process.processIdentifier, SIGKILL)
-                ffmpegProcess = nil
-                log("Old FFmpeg killed")
-            }
-
-            // Start new FFmpeg at new position (same client socket)
-            startFFmpeg(at: time)
-            // Don't auto-pause after seek
-            // pendingSeekPauseAt = time
-        }
-
-        // End seek in paused state, but wait until new PTS arrives so the
-        // receiver has a frame from the seek target before we stop.
+        // awaitClientReconnect ignored for HLS; restart immediately
+        startFFmpeg(at: time)
         isPaused = false
         onStateChanged?(isPaused, currentPosition)
     }
 
-    private func updatePositionFromPts(_ position: TimeInterval) {
-        // Guard against backwards jumps from jitter; seeks reset the baseline.
-        if position + 0.5 < currentPosition {
-            return
-        }
-
-        currentPosition = position
-        onProgress?(position)
-        onStateChanged?(isPaused, position)
-
-        if let pending = pendingSeekPauseAt, position >= pending {
-            forcePause()
-        }
-    }
+    // MARK: - Utilities
 
     private func getLocalIPAddress() -> String {
         var address = "127.0.0.1"
@@ -532,110 +411,6 @@ public final class TranscodeServer: @unchecked Sendable {
 
     deinit {
         stop()
-    }
-}
-
-private final class MpegTsPtsTracker {
-    private var buffer = Data()
-    private var lastPtsSeconds: TimeInterval?
-
-    func reset(baseline: TimeInterval) {
-        buffer.removeAll(keepingCapacity: true)
-        lastPtsSeconds = baseline
-    }
-
-    func consume(_ data: Data) -> TimeInterval? {
-        buffer.append(data)
-        var latest: TimeInterval?
-
-        while buffer.count >= 188 {
-            if buffer[buffer.startIndex] != 0x47 {
-                if let syncIndex = buffer.firstIndex(of: 0x47) {
-                    buffer = Data(buffer[syncIndex...])
-                } else {
-                    buffer.removeAll(keepingCapacity: true)
-                    break
-                }
-                if buffer.count < 188 {
-                    break
-                }
-            }
-
-            let packet = Data(buffer.prefix(188))
-            if let pts = parsePts(from: packet) {
-                lastPtsSeconds = pts
-                latest = pts
-            }
-            buffer = Data(buffer.dropFirst(188))
-        }
-
-        return latest
-    }
-
-    private func parsePts(from packet: Data) -> TimeInterval? {
-        guard packet.count >= 188 else { return nil }
-        if packet[packet.startIndex] != 0x47 {
-            return nil
-        }
-
-        let b1 = packet[packet.startIndex + 1]
-        let b3 = packet[packet.startIndex + 3]
-        let payloadUnitStart = (b1 & 0x40) != 0
-        let adaptationFieldControl = (b3 & 0x30) >> 4
-
-        if adaptationFieldControl == 0 || adaptationFieldControl == 2 {
-            return nil
-        }
-
-        var payloadOffset = 4
-        if adaptationFieldControl == 3 {
-            let adaptationLength = Int(packet[packet.startIndex + 4])
-            payloadOffset += 1 + adaptationLength
-            if payloadOffset >= 188 {
-                return nil
-            }
-        }
-
-        guard payloadUnitStart else { return nil }
-        if payloadOffset + 9 >= 188 {
-            return nil
-        }
-
-        if packet[packet.startIndex + payloadOffset] != 0x00 ||
-            packet[packet.startIndex + payloadOffset + 1] != 0x00 ||
-            packet[packet.startIndex + payloadOffset + 2] != 0x01 {
-            return nil
-        }
-
-        let streamId = packet[packet.startIndex + payloadOffset + 3]
-        if streamId < 0xE0 || streamId > 0xEF {
-            return nil
-        }
-
-        let ptsDtsFlags = packet[packet.startIndex + payloadOffset + 7]
-        if (ptsDtsFlags & 0x80) == 0 {
-            return nil
-        }
-
-        let ptsOffset = payloadOffset + 9
-        if ptsOffset + 4 >= 188 {
-            return nil
-        }
-
-        let p0 = packet[packet.startIndex + ptsOffset]
-        let p1 = packet[packet.startIndex + ptsOffset + 1]
-        let p2 = packet[packet.startIndex + ptsOffset + 2]
-        let p3 = packet[packet.startIndex + ptsOffset + 3]
-        let p4 = packet[packet.startIndex + ptsOffset + 4]
-
-        let pts: UInt64 =
-            (UInt64(p0 & 0x0E) << 29) |
-            (UInt64(p1) << 22) |
-            (UInt64(p2 & 0xFE) << 14) |
-            (UInt64(p3) << 7) |
-            (UInt64(p4 & 0xFE) >> 1)
-
-        return TimeInterval(pts) / 90_000.0
     }
 }
 

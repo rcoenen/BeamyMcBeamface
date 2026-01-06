@@ -231,12 +231,15 @@ struct ContentView: View {
                     VStack(spacing: 0) {
                         // Main content area - embedded player or info display
                         if viewModel.useEmbeddedPlayer && viewModel.outputType == .mpv {
-                            // Embedded AVPlayer
+                            // Embedded AVPlayer playing original file directly
                             AVPlayerView(
                                 url: viewModel.currentFile,
                                 isPlaying: $viewModel.embeddedIsPlaying,
                                 currentTime: $viewModel.embeddedCurrentTime,
-                                duration: $viewModel.embeddedDuration
+                                duration: $viewModel.embeddedDuration,
+                                onCoordinatorReady: { coordinator in
+                                    viewModel.embeddedPlayerCoordinator = coordinator
+                                }
                             )
                             .background(Color.black)
                         } else {

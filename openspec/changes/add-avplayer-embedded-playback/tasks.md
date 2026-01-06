@@ -2,10 +2,11 @@
 
 ## Phase 0: Spec Alignment
 
-### 0.1 Merge capability changes into `video-preview`
+### 0.1 Align capability changes into `video-preview`
 - [ ] Replace `avplayer-embedded` delta with a delta against `video-preview`
-- [ ] Add output-switching scenario for on-demand TranscodeServer startup
-- [ ] Add unsupported-format fallback scenario for external mpv
+- [ ] Require transcoder start on file drop and embedded player uses transcoder URL
+- [ ] Require output switching to reuse the same stream URL
+- [ ] Remove external player fallback; embed always uses transcoder
 - [ ] Validate change: `openspec validate add-avplayer-embedded-playback --strict`
 
 ## Phase 1: Core AVPlayer Implementation
@@ -13,34 +14,27 @@
 ### 1.1 Create AVPlayerView component
 - [ ] Create `Sources/BeamyApp/AVPlayerView.swift`
 - [ ] Implement SwiftUI view wrapping AVKit VideoPlayer
-- [ ] Add URL binding for video source
-- [ ] Add isPlaying binding for play/pause state
-- [ ] Add currentTime binding for position tracking
-- [ ] Add duration binding for total length
+- [ ] Accept a stream URL (from TranscodeServer)
+- [ ] Add isPlaying/currentTime/duration bindings
 - [ ] Implement periodic time observer (0.25s interval)
 - [ ] Handle onAppear/onDisappear lifecycle
 - [ ] Verify: View compiles and shows VideoPlayer
 
-### 1.2 Add format detection helper
-- [ ] Create `canPlay(url:)` static method on AVPlayerView
-- [ ] Pre-filter extensions and confirm with `AVURLAsset(url:).isPlayable`
-- [ ] Return false for MKV, WebM, AVI
-- [ ] Verify: Returns correct values for test files
-
-### 1.3 Wire AVPlayerView into ContentView
+### 1.2 Wire AVPlayerView into ContentView
 - [ ] Import AVPlayerView in ContentView.swift
 - [ ] Replace MpvPlayerView conditional with AVPlayerView
-- [ ] Pass appropriate bindings from viewModel
-- [ ] Verify: AVPlayerView appears when output=mpv and file loaded
+- [ ] Pass stream URL from viewModel (transcoder)
+- [ ] Verify: AVPlayerView appears when output=embedded and file loaded
 
 ## Phase 2: ViewModel Integration
 
-### 2.1 Update CastingViewModel for AVPlayer
+### 2.1 Update CastingViewModel for AVPlayer + Transcoder
 - [ ] Re-enable `useEmbeddedPlayer = true`
 - [ ] Remove MpvPlayerView-specific coordinator code
-- [ ] Add AVPlayer instance management
-- [ ] Update `handleFileDrop` to check format support with `isPlayable`
-- [ ] Verify: File drop creates AVPlayer for supported formats; unsupported falls back cleanly
+- [ ] Start/keep TranscodeServer running on file drop
+- [ ] Surface transcoder stream URL to the view
+- [ ] Create AVPlayer with stream URL; no external fallback
+- [ ] Verify: File drop creates AVPlayer streaming transcoder output
 
 ### 2.2 Implement playback controls
 - [ ] Connect `togglePlayPause()` to AVPlayer
@@ -52,16 +46,16 @@
 ### 2.3 Implement position tracking
 - [ ] Subscribe to AVPlayer time observer in ViewModel
 - [ ] Update `embeddedCurrentTime` from observer
-- [ ] Update `embeddedDuration` from AVPlayer item
+- [ ] Update `embeddedDuration` from AVPlayer item (if available from stream)
 - [ ] Update `embeddedIsPlaying` from AVPlayer rate
 - [ ] Verify: Seek bar updates during playback
 
 ## Phase 3: Output Switching
 
-### 3.1 AVPlayer to Chromecast handoff (on-demand TranscodeServer)
+### 3.1 Embedded to Chromecast handoff (shared transcoder)
 - [ ] Capture position from AVPlayer before switch
 - [ ] Pause AVPlayer on switch to Chromecast
-- [ ] Start TranscodeServer if not running; seek to captured position
+- [ ] Seek TranscodeServer to captured position (if needed)
 - [ ] Verify: Position preserved when switching to Chromecast
 
 ### 3.2 Chromecast to AVPlayer handoff
@@ -73,11 +67,10 @@
 
 ## Phase 4: Unsupported Format Handling
 
-### 4.1 External mpv fallback
-- [ ] Detect unsupported format via `canPlay(url:)`
-- [ ] Fall back to external MpvPlayer with file URL for unsupported formats
-- [ ] Show info message "Playing in external window (format not supported)"
-- [ ] Verify: MKV files open in external mpv and controls remain responsive
+### 4.1 Remove external player fallback
+- [ ] Delete/disable external mpv fallback paths
+- [ ] Ensure embedded always uses transcoder stream
+- [ ] Verify: Unsupported formats still play via transcoder stream
 
 ### 4.2 User feedback for format issues
 - [ ] Show clear error when format unsupported and no mpv available

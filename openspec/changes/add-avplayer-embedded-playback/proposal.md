@@ -4,7 +4,7 @@
 `add-avplayer-embedded-playback`
 
 ## Summary
-Replace the crashed NSOpenGLView-based mpv embedded player with Apple's native AVPlayer/AVKit for embedded video playback in the macOS SwiftUI app, keeping local playback on the original file and starting the transcoder only when handing off to Chromecast.
+Replace the crashed NSOpenGLView-based mpv embedded player with Apple's native AVPlayer/AVKit for embedded video playback in the macOS SwiftUI app, and always feed it the transcoder stream (same stream Chromecast uses).
 
 ## Background
 
@@ -17,15 +17,15 @@ The current MpvPlayerView (using NSOpenGLView + libmpv) crashes when embedded in
 See `EmbeddedPlayer.md` for full analysis.
 
 ### Solution
-Use AVPlayer (Apple's native video framework) for local playback of the original file (best quality, no transcode), and start the existing FFmpeg-based `TranscodeServer` on-demand when switching to Chromecast so the cast path still uses Matroska/HLS output. This keeps local playback fast while ensuring Chromecast still has a stream to load.
+Use AVPlayer (Apple's native video framework) to play the transcoder output stream for all embedded playback. Start the existing FFmpeg-based `TranscodeServer` immediately on file drop (or on-demand if not running) and point both the embedded player and Chromecast at the same stream URL so behavior matches across outputs. Remove external mpv fallback.
 
 ## Scope
 
 ### In Scope
 1. **AVPlayer-based embedded player view** - SwiftUI view using AVKit's VideoPlayer
-2. **Local file playback** - Play original video files directly (no transcoding needed for local playback)
+2. **Transcoder-backed playback** - Always play the transcoder stream URL internally
 3. **Playback controls integration** - Play/pause, seek, position tracking via AVPlayer
-4. **Output switching** - On-demand `TranscodeServer` startup when switching from local AVPlayer to Chromecast, preserving position
+4. **Output switching** - `TranscodeServer` feeds both embedded player and Chromecast; switching uses the same stream URL with position preservation
 
 ### Out of Scope
 - Chromecast stream preview (monitoring transcoded output in embedded player)
@@ -34,33 +34,31 @@ Use AVPlayer (Apple's native video framework) for local playback of the original
 
 ## Design Rationale
 
-### Why AVPlayer for Local Playback?
-When output type is "mpv" (local), we don't need transcoding at all:
-- AVPlayer can play most video formats directly (MP4, MOV, M4V)
-- For formats AVPlayer doesn't support (MKV), we transcode on-demand
-- This matches the existing `video-preview` spec which states "video plays from the original file (not transcoded)"
+### Why AVPlayer for Embedded Playback?
+- AVPlayer integrates cleanly with SwiftUI via `VideoPlayer`
+- No external dependencies or NSOpenGL embedding issues
+- Plays HTTP streams when the transcoder outputs an AVPlayer-friendly format
+- Using the transcoder stream keeps behavior identical between embedded player and Chromecast
 
-### Why Not AVPlayer for Chromecast Monitoring?
-- TranscodeServer outputs Matroska format (AVPlayer doesn't support MKV)
-- Changing to HLS/fMP4 would require significant TranscodeServer changes
-- Chromecast playback doesn't need local preview (it's on the TV)
-- Can add this later if needed
+### Stream Format
+- TranscodeServer must emit an AVPlayer-compatible stream (e.g., HLS/fMP4)
+- Chromecast consumes the same stream (or a compatible variant) from the transcoder URL
 
-### Architecture (Option B: on-demand transcoder)
+### Architecture (Single Stream from Transcoder)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ ContentView                                                  │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │ Output = Local (mpv)     │ Output = Chromecast      │    │
+│  │ Output = Embedded        │ Output = Chromecast      │    │
 │  │  ┌───────────────────┐   │  ┌───────────────────┐  │    │
 │  │  │ AVPlayerView      │   │  │ Chromecast Client │  │    │
-│  │  │ - original file   │   │  │ - loads server    │  │    │
-│  │  │ - native controls │   │  │   URL when needed │  │    │
+│  │  │ - loads transcoder│   │  │ - loads same URL  │  │    │
+│  │  │   stream URL      │   │  │                   │  │    │
 │  │  └───────────────────┘   │  └───────────────────┘  │    │
 │  └─────────────────────────────────────────────────────┘    │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │ TranscodeServer (FFmpeg) started only for casting   │    │
+│  │ TranscodeServer (FFmpeg) started on file drop       │    │
 │  └─────────────────────────────────────────────────────┘    │
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │ PlaybackControlsView (unified for both outputs)     │    │
@@ -71,11 +69,11 @@ When output type is "mpv" (local), we don't need transcoding at all:
 ## Capabilities Affected
 
 ### Modified Capability: `video-preview`
-- Embed AVPlayer for local playback of the original file
-- On unsupported formats, fall back to external mpv (file path)
+- Embed AVPlayer for playback of the transcoder stream (always)
+- No external player fallback
 
 ### Modified Capability: `output-switching`
-- Start/stop `TranscodeServer` on demand when switching to/from Chromecast
+- Start/stop `TranscodeServer` as needed, but both embedded and Chromecast consume the same stream URL
 
 ## Risks & Mitigations
 

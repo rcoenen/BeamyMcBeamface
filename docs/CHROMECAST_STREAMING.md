@@ -7,7 +7,7 @@
 Attempted to stream raw MPEG-TS over HTTP to Chromecast using Cast V2 Protocol with the following configuration:
 ```swift
 try client.loadMedia(
-    url: server.url,              // http://192.168.8.236:8080/stream.ts
+    url: server.url,              // http://192.168.8.236:8080/stream.m3u8
     contentType: "video/mp2t",    // Raw MPEG-TS container
     isLive: true                   // Live stream mode
 )
@@ -122,7 +122,7 @@ try client.loadMedia(
 **Support both MPEG-TS and HLS output modes**
 
 **Architecture:**
-- `/stream.ts` → raw MPEG-TS for mpv
+- `/stream.m3u8` → HLS playlist for embedded player and Chromecast
 - `/stream.m3u8` → HLS for Chromecast
 
 **Pros:**

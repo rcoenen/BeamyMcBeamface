@@ -8,7 +8,7 @@ final class PlayerTests: XCTestCase {
         controller.position = 5
         controller.isPausedValue = true
 
-        let player = MpvPlayer(controller: controller, server: server, streamURL: URL(string: "http://localhost/stream.ts")!)
+        let player = MpvPlayer(controller: controller, server: server, streamURL: URL(string: "http://localhost/stream.m3u8")!)
 
         XCTAssertEqual(try player.getPosition(), 5)
         XCTAssertTrue(try player.isPaused())
@@ -19,7 +19,7 @@ final class PlayerTests: XCTestCase {
         controller.position = 2
         XCTAssertEqual(try player.getPosition(), 32)
         XCTAssertEqual(server.seekedTo, 30)
-        XCTAssertEqual(controller.reloadedURL?.absoluteString, "http://localhost/stream.ts")
+        XCTAssertEqual(controller.reloadedURL?.absoluteString, "http://localhost/stream.m3u8")
         XCTAssertTrue(server.isPaused) // pause restored after seek
 
         controller.isPausedValue = false

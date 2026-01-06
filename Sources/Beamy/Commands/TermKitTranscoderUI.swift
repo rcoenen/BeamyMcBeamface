@@ -516,7 +516,7 @@ final class TermKitTranscoderUI {
             chromecastSeekOffset = 0
         }
 
-        try client.loadMedia(url: server.url, contentType: "video/x-matroska", title: title, isLive: true)
+            try client.loadMedia(url: server.url, contentType: "application/vnd.apple.mpegurl", title: title, isLive: true)
         let player = ChromecastPlayer(client: client)
         if lastKnownPaused {
             try? player.pause()

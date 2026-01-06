@@ -1,7 +1,7 @@
 # Design: AVPlayer Embedded Playback
 
 ## Overview
-This design replaces the crashed mpv-based embedded player with Apple's AVPlayer/AVKit framework. Local playback stays on the original file; when switching to Chromecast we start the existing FFmpeg `TranscodeServer` on-demand and hand the cast client the server URL.
+This design replaces the crashed mpv-based embedded player with Apple's AVPlayer/AVKit framework. The transcoder runs for each dropped file and emits a single stream URL that both the embedded AVPlayer and Chromecast consume; no external player fallback.
 
 ## Component Design
 
@@ -42,22 +42,23 @@ Key responsibilities:
 
 ### 2. CastingViewModel Changes
 
-Update to use AVPlayer for local playback and keep `TranscodeServer` for Chromecast:
+Update to use AVPlayer for embedded playback and keep `TranscodeServer` as the single source stream for both embedded and Chromecast:
 
 ```swift
 @Published var avPlayer: AVPlayer?
 @Published var useEmbeddedPlayer: Bool = true  // Re-enable
 
-// Local playback: AVPlayer on original file
-// Chromecast: start TranscodeServer on-demand, launch cast client with server.url
+// Embedded playback: AVPlayer loads transcoder stream URL
+// Chromecast: uses the same server URL
 ```
 
 State flow:
-- `currentFile` set → create AVPlayer with file URL if playable
+- `currentFile` set → ensure TranscodeServer is running for the file
+- Create AVPlayer pointed at server URL
 - Play/pause → control AVPlayer directly
 - Seek → use AVPlayer.seek(to:)
 - Position → observe AVPlayer.currentTime
-- Switch to Chromecast → start TranscodeServer (if not running), seek server to current position, launch cast client
+- Switch to Chromecast → seek server to current position (if needed), launch cast client with server URL
 
 ### 3. ContentView Changes
 
@@ -75,31 +76,11 @@ if viewModel.useEmbeddedPlayer && viewModel.outputType == .mpv {
 }
 ```
 
-## Format Handling
+## Stream Format Handling
 
-### Directly Supported by AVPlayer (typical)
-- MP4 (.mp4, .m4v)
-- QuickTime (.mov)
-- MPEG-4 audio (.m4a)
-- HLS streams (.m3u8)
-
-### Not Supported (Fallback Required)
-- Matroska (.mkv)
-- WebM (.webm)
-- AVI (.avi)
-
-### Detection
-- First, pre-filter by extension (fast path).
-- Confirm with `AVURLAsset(url:).isPlayable` to catch codec/container issues.
-
-### Fallback Strategy (external mpv)
-```swift
-if !AVPlayerView.canPlay(url: url) {
-    // Fall back to external mpv with file URL (no transcoder needed)
-    MpvPlayer.play(fileURL: url)
-    showMessage("Playing in external window (format not supported)")
-}
-```
+- Transcoder must emit an AVPlayer-compatible stream (e.g., HLS/fMP4) from a single URL endpoint.
+- AVPlayer loads the transcoder URL directly; no format detection or external fallback.
+- Chromecast loads the same URL (or variant) from TranscodeServer.
 
 ## State Synchronization
 
@@ -150,15 +131,15 @@ When switching from AVPlayer (local) to Chromecast:
 
 1. Capture current position from AVPlayer
 2. Pause AVPlayer
-3. Start TranscodeServer (if not running) and seek to captured position
-4. Connect Chromecast to stream (Matroska) at that URL
+3. Ensure TranscodeServer is running and seek to captured position
+4. Connect Chromecast to the stream URL
 5. Optionally: keep AVPlayer paused for quick switch-back
 
 When switching from Chromecast to AVPlayer (local):
 
 1. Get current position from Chromecast
 2. Stop Chromecast playback
-3. Stop/cleanup TranscodeServer if not needed
+3. Keep TranscodeServer running for embedded playback
 4. Seek AVPlayer to position
 5. Resume AVPlayer playback
 

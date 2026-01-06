@@ -14,8 +14,8 @@ public final class ChromecastPlayer: Player {
             try client.sendMediaCommand(type: type, mediaSessionId: mediaSessionId, additional: additional)
         }
         self.reloadHandler = { url in
-            try client.loadMedia(url: url, contentType: "video/x-matroska", isLive: true)
-        }
+        try client.loadMedia(url: url, contentType: "application/vnd.apple.mpegurl", isLive: true)
+    }
         self.statusRequester = {
             try client.requestMediaStatus()
         }

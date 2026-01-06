@@ -1,35 +1,39 @@
 import SwiftUI
 import AVKit
-import AVFoundation
 
+/// NSViewRepresentable wrapper around AVPlayerView that plays any URL (files or streams).
+/// Exposes a coordinator so the view model can control playback.
 struct AVPlayerView: NSViewRepresentable {
-    typealias NSViewType = AVKit.AVPlayerView
-
     let url: URL?
     @Binding var isPlaying: Bool
     @Binding var currentTime: TimeInterval
     @Binding var duration: TimeInterval
 
-    func makeNSView(context: Context) -> NSViewType {
-        let view = NSViewType()
-        view.controlsStyle = .none  // We have our own controls
-        view.player = context.coordinator.player
+    var onCoordinatorReady: ((Coordinator) -> Void)?
 
-        context.coordinator.setupPlayer(url: url)
+    func makeNSView(context: Context) -> AVKit.AVPlayerView {
+        let view = AVKit.AVPlayerView()
+        view.controlsStyle = .none
+        view.player = context.coordinator.player
+        onCoordinatorReady?(context.coordinator)
         return view
     }
 
-    func updateNSView(_ nsView: NSViewType, context: Context) {
-        // Update player when URL changes
-        if context.coordinator.currentURL != url {
-            context.coordinator.setupPlayer(url: url)
+    func updateNSView(_ nsView: AVKit.AVPlayerView, context: Context) {
+        // Load URL if changed
+        if context.coordinator.currentURL != url, let url = url {
+            context.coordinator.load(url: url, autoPlay: isPlaying)
         }
 
-        // Sync playback state
-        context.coordinator.syncPlaybackState(isPlaying)
+        // Sync play/pause
+        if isPlaying {
+            context.coordinator.play()
+        } else {
+            context.coordinator.pause()
+        }
 
-        // Handle seek requests
-        context.coordinator.handleSeek(to: currentTime)
+        // Seek if binding moved significantly
+        context.coordinator.syncSeek(target: currentTime)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -40,104 +44,102 @@ struct AVPlayerView: NSViewRepresentable {
         )
     }
 
-    class Coordinator: NSObject {
+    final class Coordinator: NSObject {
         let player = AVPlayer()
-        var timeObserver: Any?
-        var currentURL: URL?
-        var isSeeking = false
-        var lastSeekTime: TimeInterval = 0
+        fileprivate var currentURL: URL?
+        private var timeObserver: Any?
+        private var durationObservation: NSKeyValueObservation?
 
-        @Binding var isPlaying: Bool
-        @Binding var currentTime: TimeInterval
-        @Binding var duration: TimeInterval
+        private var isPlayingBinding: Binding<Bool>
+        private var currentTimeBinding: Binding<TimeInterval>
+        private var durationBinding: Binding<TimeInterval>
+
+        private var lastSeekTarget: TimeInterval = 0
 
         init(isPlaying: Binding<Bool>, currentTime: Binding<TimeInterval>, duration: Binding<TimeInterval>) {
-            _isPlaying = isPlaying
-            _currentTime = currentTime
-            _duration = duration
+            self.isPlayingBinding = isPlaying
+            self.currentTimeBinding = currentTime
+            self.durationBinding = duration
             super.init()
+            attachObservers()
         }
 
-        func setupPlayer(url: URL?) {
-            // Clean up old observer
-            if let observer = timeObserver {
-                player.removeTimeObserver(observer)
-                timeObserver = nil
-            }
-
-            guard let url = url else {
-                player.replaceCurrentItem(with: nil)
-                currentURL = nil
-                return
-            }
-
+        func load(url: URL, autoPlay: Bool) {
             currentURL = url
-
-            // Start accessing security-scoped resource
-            let accessing = url.startAccessingSecurityScopedResource()
-
-            // Create and load player item
-            let playerItem = AVPlayerItem(url: url)
-            player.replaceCurrentItem(with: playerItem)
-
-            // Set up time observer (fires every 0.25 seconds)
-            let interval = CMTime(seconds: 0.25, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-            let observer = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-                guard let self = self, !self.isSeeking else { return }
-
-                self.currentTime = time.seconds
-
-                // Update duration when available
-                if let item = self.player.currentItem {
-                    let itemDuration = item.duration.seconds
-                    if itemDuration.isFinite && itemDuration > 0 {
-                        self.duration = itemDuration
-                    }
-                }
+            let item = AVPlayerItem(url: url)
+            player.replaceCurrentItem(with: item)
+            attachDurationObservation(to: item)
+            if autoPlay {
+                play()
+            } else {
+                pause()
             }
+            lastSeekTarget = 0
+        }
 
-            timeObserver = observer
+        func play() {
+            player.play()
+            isPlayingBinding.wrappedValue = true
+        }
 
-            // Stop accessing security-scoped resource
-            if accessing {
-                url.stopAccessingSecurityScopedResource()
-            }
+        func pause() {
+            player.pause()
+            isPlayingBinding.wrappedValue = false
+        }
 
-            // Auto-play if needed
-            if isPlaying {
-                player.play()
+        func togglePause() {
+            if player.timeControlStatus == .paused {
+                play()
+            } else {
+                pause()
             }
         }
 
-        func syncPlaybackState(_ shouldPlay: Bool) {
-            if shouldPlay && player.rate == 0 {
-                player.play()
-            } else if !shouldPlay && player.rate > 0 {
-                player.pause()
+        func seek(to time: TimeInterval) {
+            lastSeekTarget = time
+            let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+            player.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+
+        func syncSeek(target: TimeInterval) {
+            // avoid redundant seeks if we're already near the target
+            if abs(lastSeekTarget - target) < 0.1 { return }
+            seek(to: target)
+        }
+
+        private func attachObservers() {
+            // Time observer
+            timeObserver = player.addPeriodicTimeObserver(
+                forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
+                queue: .main
+            ) { [weak self] time in
+                guard let self else { return }
+                let seconds = time.seconds
+                currentTimeBinding.wrappedValue = seconds
+                let playing = player.timeControlStatus == .playing
+                isPlayingBinding.wrappedValue = playing
+            }
+
+            if let item = player.currentItem {
+                attachDurationObservation(to: item)
             }
         }
 
-        func handleSeek(to time: TimeInterval) {
-            // Only seek if the change is significant (user drag vs time observer)
-            guard !isSeeking else { return }
-
-            let playerTime = CMTimeGetSeconds(player.currentTime())
-            if abs(time - playerTime) > 1.0 {
-                isSeeking = true
-                lastSeekTime = time
-
-                let cmTime = CMTime(seconds: time, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-                player.seek(to: cmTime) { [weak self] _ in
-                    self?.isSeeking = false
+        private func attachDurationObservation(to item: AVPlayerItem) {
+            durationObservation = item.observe(\.duration, options: [.new]) { [weak self] _, change in
+                guard let self, let newDuration = change.newValue else { return }
+                let seconds = newDuration.seconds
+                if seconds.isFinite && seconds > 0 {
+                    durationBinding.wrappedValue = seconds
                 }
             }
         }
 
         deinit {
-            if let observer = timeObserver {
-                player.removeTimeObserver(observer)
+            if let obs = timeObserver {
+                player.removeTimeObserver(obs)
             }
-            player.replaceCurrentItem(with: nil)
+            durationObservation = nil
         }
     }
 
