@@ -142,10 +142,11 @@ public final class TranscodeServer: @unchecked Sendable {
 
         // Send HTTP response headers
         let headers = """
-        HTTP/1.0 200 OK\r
-        Content-Type: video/mp2t\r
+        HTTP/1.1 200 OK\r
+        Content-Type: video/x-matroska\r
         Access-Control-Allow-Origin: *\r
         Cache-Control: no-cache\r
+        Connection: close\r
         \r
 
         """
@@ -244,13 +245,12 @@ public final class TranscodeServer: @unchecked Sendable {
         ]
 
         // Output format - flush immediately to prevent buffering issues
-        // Force keyframe at start and resend headers for clean seek transitions
+        // Force keyframe at start for clean seek transitions
         args += [
             "-force_key_frames", "expr:eq(n,0)",
             "-flush_packets", "1",
             "-fflags", "+flush_packets+genpts",
-            "-mpegts_flags", "+resend_headers",
-            "-f", "mpegts",
+            "-f", "matroska",
             "pipe:1"
         ]
 

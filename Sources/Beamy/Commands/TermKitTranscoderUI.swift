@@ -474,7 +474,7 @@ final class TermKitTranscoderUI {
         let client = CastV2Client(device: device, verbose: true)
         try client.connect()
         try client.launchDefaultMediaReceiver()
-        try client.loadMedia(url: server.url, contentType: "video/mp2t", title: title, isLive: true)
+        try client.loadMedia(url: server.url, contentType: "video/x-matroska", title: title, isLive: true)
         let player = ChromecastPlayer(client: client)
         if lastKnownPosition > 0 {
             try? player.seek(to: lastKnownPosition)
