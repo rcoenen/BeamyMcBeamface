@@ -51,16 +51,44 @@ public final class ChromecastPlayer: Player {
     public func pause() throws {
         let status = try currentStatus()
         try commandSender("PAUSE", status.mediaSessionId, [:])
+
+        // Validate pause completed
+        let validated = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
+            updatedStatus.playerState == .paused
+        }
+
+        if !validated {
+            print("[ChromecastPlayer] Warning: Pause not confirmed within 3s")
+        }
     }
 
     public func resume() throws {
         let status = try currentStatus()
         try commandSender("PLAY", status.mediaSessionId, [:])
+
+        // Validate resume completed
+        let validated = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
+            updatedStatus.playerState == .playing
+        }
+
+        if !validated {
+            print("[ChromecastPlayer] Warning: Resume not confirmed within 3s")
+        }
     }
 
     public func seek(to time: TimeInterval) throws {
         let status = try currentStatus()
         try commandSender("SEEK", status.mediaSessionId, ["currentTime": time])
+
+        // Validate seek completed (within ±2s tolerance)
+        let validated = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
+            abs(updatedStatus.currentTime - time) < 2.0
+        }
+
+        if !validated {
+            // Log warning but don't fail - seek was sent, just not confirmed
+            print("[ChromecastPlayer] Warning: Seek to \(time)s not confirmed within 3s")
+        }
     }
 
     public func reload(url: URL) throws {
@@ -74,5 +102,19 @@ public final class ChromecastPlayer: Player {
             throw PlayerError.statusUnavailable
         }
         return status
+    }
+
+    /// Wait for status update matching predicate, polling every 100ms up to timeout
+    private func waitForStatusUpdate(timeout: TimeInterval, predicate: (MediaStatus) -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if let status = statusProvider(), predicate(status) {
+                return true  // Validation succeeded
+            }
+            Thread.sleep(forTimeInterval: 0.1)  // Yield thread, poll again
+        }
+
+        return false  // Timeout
     }
 }

@@ -219,6 +219,7 @@ public final class CastV2Client: @unchecked Sendable {
     }
 
     /// Send a media control command (PLAY, PAUSE, SEEK) to the active session.
+    /// Retries once on failure after 500ms delay.
     public func sendMediaCommand(type: String, mediaSessionId: Int? = nil, additional: [String: Any] = [:]) throws {
         guard let transportId = transportId else {
             throw CastV2Error.notConnected
@@ -234,11 +235,31 @@ public final class CastV2Client: @unchecked Sendable {
             payload["mediaSessionId"] = sessionId
         }
 
-        try sendMessage(
-            namespace: nsMedia,
-            destinationId: transportId,
-            payload: payload
-        )
+        // Retry logic: attempt once, retry on failure
+        var lastError: Error?
+        for attempt in 1...2 {
+            do {
+                try sendMessage(
+                    namespace: nsMedia,
+                    destinationId: transportId,
+                    payload: payload
+                )
+                if attempt == 2 {
+                    log("Command \(type) succeeded on retry")
+                }
+                return  // Success
+            } catch {
+                lastError = error
+                if attempt == 1 {
+                    log("Command \(type) failed (attempt \(attempt)/2): \(error). Retrying...")
+                    Thread.sleep(forTimeInterval: 0.5)  // Wait before retry
+                }
+            }
+        }
+
+        // Both attempts failed
+        log("Command \(type) failed after 2 attempts")
+        throw lastError ?? CastV2Error.sendFailed("Unknown error")
     }
 
     public func disconnect() {
