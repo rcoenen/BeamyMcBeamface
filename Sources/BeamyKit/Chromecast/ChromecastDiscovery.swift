@@ -47,6 +47,7 @@ private final class MDNSBrowser: NSObject, NetServiceBrowserDelegate, NetService
     private var resolvedCount = 0
     private var expectedCount = 0
     private var isSearching = true
+    private let resolveTimeout: Double = 3.0
 
     func discover(timeout: Double) -> [ChromecastDevice] {
         devices = []
@@ -146,7 +147,8 @@ private final class MDNSBrowser: NSObject, NetServiceBrowserDelegate, NetService
             address: address,
             port: sender.port,
             id: id ?? sender.name,
-            model: model
+            model: model,
+            resolvedCastType: resolveCastType(address: address, port: sender.port, timeout: resolveTimeout)
         )
 
         lock.lock()
@@ -158,5 +160,29 @@ private final class MDNSBrowser: NSObject, NetServiceBrowserDelegate, NetService
         lock.lock()
         resolvedCount += 1
         lock.unlock()
+    }
+
+    /// Mirrors PyChromecast's cast_type classification:
+    /// - If port != 8009 ⇒ group
+    /// - Otherwise call /setup/eureka_info?params=device_info,name (https 8443, fallback http 8008)
+    ///   and treat capabilities.display_supported == false as audio, else chromecast.
+    private func resolveCastType(address: String, port: Int, timeout: Double) -> CastType? {
+        if port != 8009 {
+            return .group
+        }
+        let schemesAndPorts: [(String, Int)] = [("https", 8443), ("http", 8008)]
+        for (scheme, servicePort) in schemesAndPorts {
+            guard let url = URL(string: "\(scheme)://\(address):\(servicePort)/setup/eureka_info?params=device_info,name") else {
+                continue
+            }
+            if let data = try? Data(contentsOf: url),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let deviceInfo = json["device_info"] as? [String: Any],
+               let capabilities = deviceInfo["capabilities"] as? [String: Any],
+               let displaySupported = capabilities["display_supported"] as? Bool {
+                return displaySupported ? .video : .audio
+            }
+        }
+        return nil
     }
 }

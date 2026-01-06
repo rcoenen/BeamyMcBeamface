@@ -13,23 +13,40 @@ public struct ChromecastDevice: Sendable, Hashable, Equatable {
     public let port: Int
     public let id: String
     public let model: String?
+    /// Optional, pre-resolved cast type (e.g., from /setup/eureka_info)
+    public let resolvedCastType: CastType?
 
-    public init(name: String, address: String, port: Int, id: String, model: String? = nil) {
+    public init(name: String, address: String, port: Int, id: String, model: String? = nil, resolvedCastType: CastType? = nil) {
         self.name = name
         self.address = address
         self.port = port
         self.id = id
         self.model = model
+        self.resolvedCastType = resolvedCastType
     }
 
     /// Determines the device type based on model name and port
     public var castType: CastType {
+        if let resolvedCastType {
+            return resolvedCastType
+        }
+
         // Groups use non-standard ports
         if port != 8009 {
             return .group
         }
 
-        guard let model = model?.lowercased() else {
+        let modelLower = model?.lowercased()
+        let nameLower = name.lowercased()
+
+        guard let model = modelLower else {
+            // Fallback to friendly name heuristics when model is missing.
+            if nameLower.contains("tv") || nameLower.contains("display") || nameLower.contains("chromecast") {
+                return .video
+            }
+            if nameLower.contains("speaker") || nameLower.contains("audio") {
+                return .audio
+            }
             return .unknown
         }
 

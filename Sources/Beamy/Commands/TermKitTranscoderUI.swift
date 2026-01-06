@@ -27,6 +27,12 @@ final class TermKitTranscoderUI {
         let cleanup: () -> Void
     }
 
+    enum DiscoveryState {
+        case idle
+        case scanning(started: Date)
+        case completed(devices: [ChromecastDevice], timestamp: Date)
+    }
+
     private let server: TranscodeServer
     private let duration: TimeInterval
     private let title: String
@@ -45,6 +51,14 @@ final class TermKitTranscoderUI {
     private var outputRadio: RadioGroup?
     private var outputFrame: Frame?
     private weak var chromecastButton: Button?
+
+    // Discovery state with thread-safe access
+    private let discoveryQueue = DispatchQueue(label: "com.beamy.discovery", qos: .userInitiated)
+    private var _discoveryState: DiscoveryState = .idle
+    private var discoveryState: DiscoveryState {
+        get { discoveryQueue.sync { _discoveryState } }
+        set { discoveryQueue.sync { _discoveryState = newValue } }
+    }
 
     init(
         server: TranscodeServer,
@@ -100,24 +114,16 @@ final class TermKitTranscoderUI {
         outputFrame.width = Dim.sized(40)
         outputFrame.height = Dim.sized(6)
 
-        let chromecastLabelText: String
+        // Load saved Chromecast device if available
         if let saved = config.chromecast.defaultDevice {
-            chromecastLabelText = "_Chromecast (\(saved))"
             selectedChromecastName = saved
         } else {
-            chromecastLabelText = "_Chromecast (none)"
             // If Chromecast was selected but there's no device, force to mpv
             if selectedOutput == .chromecast {
                 log("No Chromecast device configured - forcing output to mpv")
                 selectedOutput = .mpv
             }
         }
-
-        let initialRadio = RadioGroup(labels: ["_mpv", chromecastLabelText], selected: selectedOutput?.rawValue, orientation: .vertical)
-        initialRadio.x = Pos.at(1)
-        initialRadio.y = Pos.at(1)
-        outputFrame.addSubview(initialRadio)
-        self.outputRadio = initialRadio
 
         let chromecastButton = Button("Select Chromecast…")
         chromecastButton.x = Pos.at(1)
@@ -139,18 +145,9 @@ final class TermKitTranscoderUI {
             self.applyOutputChoice(.chromecast, statusLabel: statusLabel, forcePicker: true)
         }
 
-        initialRadio.selectionChanged = { [weak self, weak statusLabel, weak initialRadio] _, _, newSelection in
-            guard let self, let choice = newSelection.flatMap(OutputChoice.init(rawValue:)) else { return }
-            // If user tries to select Chromecast but there's no device, revert to mpv
-            if choice == .chromecast && self.selectedChromecastName == nil {
-                self.log("Cannot select Chromecast (none) - reverting to mpv")
-                initialRadio?.selected = OutputChoice.mpv.rawValue
-                self.selectedOutput = .mpv
-                statusLabel?.text = "Status: no Chromecast device selected (press Select Chromecast... button)"
-                return
-            }
-            self.applyOutputChoice(choice, statusLabel: statusLabel)
-        }
+        // Build initial radio with dynamic labels (only shows Chromecast if device configured)
+        // Note: selectionChanged handler is set by rebuildOutputRadio()
+        rebuildOutputRadio(chromecastName: selectedChromecastName, selected: selectedOutput?.rawValue, statusLabel: statusLabel)
 
         let timeLabel = Label("Time: --:--:-- / \(formatTime(duration))")
         timeLabel.x = Pos.at(1)
@@ -288,6 +285,10 @@ final class TermKitTranscoderUI {
         }
 
         startTimer(statusLabel: statusLabel, timeLabel: timeLabel, percentLabel: percentLabel, barLabel: barLabel)
+
+        // Start background Chromecast discovery
+        startBackgroundDiscovery()
+
         Application.run()
         timer?.cancel()
         cleanupCurrentPlayer()
@@ -486,34 +487,168 @@ final class TermKitTranscoderUI {
         }
     }
 
-    private func presentDiscovery(statusLabel: Label?, timeout: Double, completion: @escaping @Sendable (ChromecastDevice?) -> Void) {
-        showSpinner(message: "Scanning for Chromecasts…")
-        statusLabel?.text = "Status: discovering Chromecast devices..."
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak statusLabel, completion] in
+    private func startBackgroundDiscovery() {
+        // Check if already scanning or have recent results
+        switch discoveryState {
+        case .scanning:
+            log("Discovery already in progress - skipping duplicate scan")
+            return
+        case .completed(_, let timestamp) where Date().timeIntervalSince(timestamp) < 30:
+            log("Using recent discovery results (age: \(Int(Date().timeIntervalSince(timestamp)))s)")
+            return
+        case .idle, .completed:
+            break
+        }
+
+        log("Starting background Chromecast discovery")
+        discoveryState = .scanning(started: Date())
+
+        let timeout = config.chromecast.discoveryTimeout
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+
             let devices = (try? ChromecastDiscovery.discover(timeout: timeout)) ?? []
-            self.log("Chromecast discovery complete (\(devices.count) total):")
+            self.log("Background discovery complete (\(devices.count) total devices)")
             for device in devices {
-                self.log("  - \(device.name) model=\(device.model ?? "unknown") type=\(device.castType.rawValue) addr=\(device.address):\(device.port)")
+                self.log("  - \(device.name) model=\(device.model ?? "unknown") type=\(device.castType.rawValue)")
             }
+
             let videoDevices = devices.filter { $0.isVideoCapable }
+            self.log("Background discovery: \(videoDevices.count) video-capable devices")
 
             DispatchQueue.main.async {
+                self.handleDiscoveryComplete(devices: videoDevices)
+            }
+        }
+    }
+
+    private func handleDiscoveryComplete(devices: [ChromecastDevice]) {
+        log("Handling discovery completion with \(devices.count) video-capable devices")
+        discoveryState = .completed(devices: devices, timestamp: Date())
+
+        // Auto-invalidate configured device if not found
+        autoInvalidateConfiguredDevice(devices: devices)
+    }
+
+    private func autoInvalidateConfiguredDevice(devices: [ChromecastDevice]) {
+        guard let configured = selectedChromecastName else {
+            // No device configured, nothing to invalidate
+            return
+        }
+
+        let exists = devices.contains(where: { $0.name == configured })
+
+        if !exists {
+            log("Background discovery: '\(configured)' not found - auto-invalidating")
+
+            // Update all three representations
+            selectedChromecastName = nil
+            selectedOutput = .mpv
+            outputRadio?.selected = OutputChoice.mpv.rawValue
+            config.chromecast.defaultDevice = nil
+            try? config.save()
+            rebuildOutputRadio(chromecastName: nil, selected: OutputChoice.mpv.rawValue, statusLabel: nil)
+        } else {
+            log("Background discovery: '\(configured)' found and validated")
+        }
+    }
+
+    private func presentDiscovery(statusLabel: Label?, timeout: Double, completion: @escaping @Sendable (ChromecastDevice?) -> Void) {
+        // Check discovery state and reuse results if available
+        switch discoveryState {
+        case .completed(let devices, let timestamp):
+            // Use cached results
+            let age = Int(Date().timeIntervalSince(timestamp))
+            log("Using cached discovery results (age: \(age)s, \(devices.count) devices)")
+            statusLabel?.text = "Status: using cached results (\(age)s old)"
+            showDiscoveryDialog(devices: devices, timeout: timeout, statusLabel: statusLabel, completion: completion)
+
+        case .scanning(let started):
+            // Discovery already in progress - wait for it
+            let elapsed = Int(Date().timeIntervalSince(started))
+            log("Discovery already in progress (elapsed: \(elapsed)s) - waiting for completion")
+            showSpinner(message: "Scanning for Chromecasts…")
+            statusLabel?.text = "Status: scanning for devices..."
+
+            // Wait for discovery to complete
+            waitForDiscoveryCompletion { [weak self, weak statusLabel] devices in
+                guard let self else { return }
                 self.hideSpinner()
+                statusLabel?.text = "Status: found \(devices.count) video-capable Chromecast(s)"
+                self.showDiscoveryDialog(devices: devices, timeout: timeout, statusLabel: statusLabel, completion: completion)
+            }
 
-                // Validate configured device against discovered devices
-                self.validateConfiguredDevice(against: videoDevices)
+        case .idle:
+            // Start fresh discovery
+            log("Starting fresh discovery for modal")
+            showSpinner(message: "Scanning for Chromecasts…")
+            statusLabel?.text = "Status: discovering Chromecast devices..."
+            discoveryState = .scanning(started: Date())
 
-                if videoDevices.isEmpty {
-                    statusLabel?.text = "Status: no video-capable Chromecasts found"
-                    self.log("Chromecast discovery: 0 video-capable (found \(devices.count) total)")
-                    completion(nil)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self, weak statusLabel, completion] in
+                guard let self else { return }
+                let devices = (try? ChromecastDiscovery.discover(timeout: timeout)) ?? []
+                self.log("Modal discovery complete (\(devices.count) total):")
+                for device in devices {
+                    self.log("  - \(device.name) model=\(device.model ?? "unknown") type=\(device.castType.rawValue) addr=\(device.address):\(device.port)")
+                }
+                let videoDevices = devices.filter { $0.isVideoCapable }
+
+                DispatchQueue.main.async {
+                    self.hideSpinner()
+                    self.discoveryState = .completed(devices: videoDevices, timestamp: Date())
+
+                    // Validate configured device against discovered devices
+                    self.validateConfiguredDevice(against: videoDevices)
+
+                    if videoDevices.isEmpty {
+                        statusLabel?.text = "Status: no video-capable Chromecasts found"
+                        self.log("Modal discovery: 0 video-capable (found \(devices.count) total)")
+                        completion(nil)
+                        return
+                    }
+                    let names = videoDevices.map { "\($0.name) (\($0.model ?? "unknown"))" }.joined(separator: ", ")
+                    self.log("Modal discovery: \(videoDevices.count) video-capable -> [\(names)]")
+                    statusLabel?.text = "Status: found \(videoDevices.count) video-capable Chromecast(s)"
+                    self.showDiscoveryDialog(devices: videoDevices, timeout: timeout, statusLabel: statusLabel, completion: completion)
+                }
+            }
+        }
+    }
+
+    private func waitForDiscoveryCompletion(completion: @escaping ([ChromecastDevice]) -> Void) {
+        // Poll discovery state until it completes
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+
+            let startWait = Date()
+            let maxWait: TimeInterval = 10.0 // 10 second timeout
+
+            while Date().timeIntervalSince(startWait) < maxWait {
+                switch self.discoveryState {
+                case .completed(let devices, _):
+                    // Discovery completed - return results
+                    DispatchQueue.main.async {
+                        completion(devices)
+                    }
+                    return
+                case .scanning:
+                    // Still scanning - wait a bit
+                    Thread.sleep(forTimeInterval: 0.1)
+                case .idle:
+                    // Unexpected state - discovery was cancelled?
+                    self.log("Warning: Discovery state became idle while waiting")
+                    DispatchQueue.main.async {
+                        completion([])
+                    }
                     return
                 }
-                let names = videoDevices.map { "\($0.name) (\($0.model ?? "unknown"))" }.joined(separator: ", ")
-                self.log("Chromecast discovery: \(videoDevices.count) video-capable -> [\(names)]")
-                statusLabel?.text = "Status: found \(videoDevices.count) video-capable Chromecast(s)"
-                self.showDiscoveryDialog(devices: videoDevices, timeout: timeout, statusLabel: statusLabel, completion: completion)
+            }
+
+            // Timeout
+            self.log("Warning: Timed out waiting for discovery completion")
+            DispatchQueue.main.async {
+                completion([])
             }
         }
     }
@@ -589,13 +724,25 @@ final class TermKitTranscoderUI {
 
         var (options, labels, activeIndex) = buildLabels()
 
+        // Add timestamp label if we have cached results
+        var timestampLabel: Label? = nil
+        if case .completed(_, let timestamp) = discoveryState {
+            let elapsed = Int(Date().timeIntervalSince(timestamp))
+            let timeStr = elapsed < 60 ? "\(elapsed)s ago" : "\(elapsed/60)m ago"
+            timestampLabel = Label("Last scanned: \(timeStr)")
+            timestampLabel!.x = Pos.at(1)
+            timestampLabel!.y = Pos.at(1)
+            timestampLabel!.width = Dim.fill(1)
+            dialog.addSubview(timestampLabel!)
+        }
+
         let list = ListView(items: labels)
         list.allowMarking = false
         list.allowsMultipleSelection = false
         list.selectedItem = activeIndex
         list.selectedMarker = ">"
         list.x = Pos.at(1)
-        list.y = Pos.at(1)
+        list.y = timestampLabel != nil ? Pos.at(2) : Pos.at(1)
         list.width = Dim.fill(1)
         list.height = Dim.sized(listHeight)
         list.autoNavigateToNextViewOnBoundary = true
@@ -626,33 +773,63 @@ final class TermKitTranscoderUI {
             self?.log("Chromecast dialog cancelled")
         }
 
-        let reload = Button("Reload")
-        reload.clicked = { [weak self] _ in
+        let rescan = Button("Rescan")
+        rescan.clicked = { [weak self] _ in
             guard let self else { return }
-            let discovered = (try? ChromecastDiscovery.discover(timeout: timeout)) ?? []
-            self.log("Reload discovery results (\(discovered.count) total):")
-            for device in discovered {
-                self.log("  - \(device.name) model=\(device.model ?? "unknown") type=\(device.castType.rawValue) addr=\(device.address):\(device.port)")
+
+            // Check if already scanning
+            if case .scanning = self.discoveryState {
+                self.log("Rescan: already scanning, ignoring")
+                statusLabel?.text = "Status: scan already in progress..."
+                return
             }
-            let videos = discovered.filter { $0.isVideoCapable }
-            if videos.isEmpty {
-                statusLabel?.text = "Status: no video-capable Chromecasts found (reload)"
-                self.log("Reload: 0 video-capable (found \(discovered.count) total)")
-            } else {
-                currentDevices = videos
-                let built = buildLabels()
-                options = built.0
-                list.items = built.1
-                list.selectedItem = built.2
-                statusLabel?.text = "Status: found \(videos.count) video-capable Chromecast(s)"
-                let names = videos.map { "\($0.name) (\($0.model ?? "unknown"))" }.joined(separator: ", ")
-                self.log("Reload: \(videos.count) video-capable -> [\(names)]")
+
+            self.log("Rescan: triggering fresh discovery")
+            statusLabel?.text = "Status: rescanning for Chromecasts..."
+
+            // Show scanning message in the list
+            list.items = ["  🔍 Scanning for Chromecasts..."]
+            list.selectedItem = 0
+
+            // Reset state to trigger fresh scan
+            self.discoveryState = .idle
+
+            // Start fresh discovery
+            self.discoveryState = .scanning(started: Date())
+            DispatchQueue.global(qos: .userInitiated).async {
+                let discovered = (try? ChromecastDiscovery.discover(timeout: timeout)) ?? []
+                let videos = discovered.filter { $0.isVideoCapable }
+
+                DispatchQueue.main.async {
+                    let scanTime = Date()
+                    self.discoveryState = .completed(devices: videos, timestamp: scanTime)
+                    self.log("Rescan: discovered \(videos.count) video-capable devices")
+
+                    // Update timestamp label
+                    timestampLabel?.text = "Last scanned: just now"
+
+                    // Rebuild the full device list including "None" option
+                    currentDevices = videos
+                    let built = buildLabels()
+                    options = built.0
+                    list.items = built.1
+                    list.selectedItem = built.2
+
+                    if videos.isEmpty {
+                        statusLabel?.text = "Status: no video-capable Chromecasts found (rescan)"
+                        self.log("Rescan: 0 video-capable devices found")
+                    } else {
+                        statusLabel?.text = "Status: found \(videos.count) video-capable Chromecast(s)"
+                        let names = videos.map { "\($0.name) (\($0.model ?? "unknown"))" }.joined(separator: ", ")
+                        self.log("Rescan: \(videos.count) video-capable -> [\(names)]")
+                    }
+                }
             }
         }
 
         dialog.addButton(ok)
         dialog.addButton(cancel)
-        dialog.addButton(reload)
+        dialog.addButton(rescan)
 
         Application.present(top: dialog)
     }
@@ -792,26 +969,28 @@ final class TermKitTranscoderUI {
         if let radio = outputRadio {
             radio.superview?.removeSubview(radio)
         }
-        let chromecastLabel = chromecastName.map { "_Chromecast (\($0))" } ?? "_Chromecast (none)"
-        let labels = ["_mpv", chromecastLabel]
+
+        // Only show Chromecast option if a device is configured
+        var labels = ["_mpv"]
+        if let name = chromecastName {
+            labels.append("_Chromecast (\(name))")
+        }
+
         let maxLen = labels.map { $0.count }.max() ?? 4
         let desiredWidth = max(40, maxLen + 6)
         frame.width = Dim.sized(min(desiredWidth, 70))
-        let newRadio = RadioGroup(labels: labels, selected: selected, orientation: .vertical)
+
+        // If Chromecast option doesn't exist, force selection to mpv
+        let actualSelected = (chromecastName == nil && selected == OutputChoice.chromecast.rawValue) ? OutputChoice.mpv.rawValue : selected
+
+        let newRadio = RadioGroup(labels: labels, selected: actualSelected, orientation: .vertical)
         newRadio.x = Pos.at(1)
         newRadio.y = Pos.at(1)
         frame.addSubview(newRadio)
+
         // Reattach handler
         newRadio.selectionChanged = { [weak self] _, _, newSelection in
             guard let self, let newSelection, let choice = OutputChoice(rawValue: newSelection) else { return }
-            // If user tries to select Chromecast but there's no device, revert to mpv
-            if choice == .chromecast && chromecastName == nil {
-                self.log("Cannot select Chromecast (none) - reverting to mpv")
-                newRadio.selected = OutputChoice.mpv.rawValue
-                self.selectedOutput = .mpv
-                statusLabel?.text = "Status: no Chromecast device selected (press Select Chromecast... button)"
-                return
-            }
             self.applyOutputChoice(choice, statusLabel: statusLabel)
         }
         outputRadio = newRadio
