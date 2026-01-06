@@ -189,25 +189,6 @@ class CastingViewModel: ObservableObject {
 
         stopPlayback()
         errorMessage = nil
-
-        // For embedded AVPlayer playback
-        if useEmbeddedPlayer && outputType == .mpv {
-            let canPlay = AVPlayerView.canPlay(url: url)
-
-            if canPlay {
-                // AVPlayer can play this - load directly (no transcoding)
-                currentFile = url
-                statusMessage = "Playing embedded"
-                embeddedIsPlaying = true
-            } else {
-                // Format not supported by AVPlayer
-                errorMessage = "Format not supported. Please use MP4 or MOV files."
-                statusMessage = "Drop a video file to start"
-            }
-            return
-        }
-
-        // For non-embedded playback (Chromecast), we need transcoder
         currentFile = url
         statusMessage = "Loading..."
 
@@ -219,13 +200,16 @@ class CastingViewModel: ObservableObject {
                 await MainActor.run {
                     self.mediaInfo = info
                     self.duration = info.duration
+                    self.embeddedDuration = info.duration
                     self.startTranscoder()
-                    self.statusMessage = "Ready to cast"
+                    self.statusMessage = "Playing embedded"
+                    self.embeddedIsPlaying = true
                 }
             } catch {
                 await MainActor.run {
                     self.errorMessage = "Failed to read media info: \(error.localizedDescription)"
                     self.statusMessage = "Drop a video file to start"
+                    self.currentFile = nil
                 }
             }
         }

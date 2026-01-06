@@ -231,9 +231,9 @@ struct ContentView: View {
                     VStack(spacing: 0) {
                         // Main content area - embedded player or info display
                         if viewModel.useEmbeddedPlayer && viewModel.outputType == .mpv {
-                            // Embedded AVPlayer playing original file directly
+                            // Embedded AVPlayer consuming transcoded stream
                             AVPlayerView(
-                                url: viewModel.currentFile,
+                                url: viewModel.transcodeServer?.url,
                                 isPlaying: $viewModel.embeddedIsPlaying,
                                 currentTime: $viewModel.embeddedCurrentTime,
                                 duration: $viewModel.embeddedDuration,

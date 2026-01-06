@@ -143,16 +143,4 @@ struct AVPlayerView: NSViewRepresentable {
         }
     }
 
-    // MARK: - Format Detection
-
-    /// Check if AVPlayer can play the given URL
-    static func canPlay(url: URL) -> Bool {
-        // Filter by extension - AVPlayer typically supports:
-        // MP4, MOV, M4V, M4A (MPEG-4 containers)
-        // Does NOT support: MKV, WebM, AVI
-        let supportedExtensions = ["mp4", "mov", "m4v", "m4a", "3gp"]
-        let ext = url.pathExtension.lowercased()
-
-        return supportedExtensions.contains(ext)
-    }
 }
