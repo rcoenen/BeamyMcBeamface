@@ -83,22 +83,22 @@ if viewModel.useEmbeddedPlayer && viewModel.outputType == .mpv {
 
 ## Potential Solutions
 
-### 1. AVPlayer with HLS (Recommended)
+### 1. AVPlayer for Local Playback (Recommended)
 
-**Key insight**: We already transcode video to HLS (H.264/AAC) via `TranscodeServer`. AVPlayer natively supports HLS, so we don't need mpv's codec support at all!
+**Key insight**: Use AVPlayer for local playback of the original file (best quality, no transcode). Keep transcoding only for Chromecast (start `TranscodeServer` on-demand and hand Chromecast the server URL).
 
 ```swift
 import AVKit
 import SwiftUI
 
 struct EmbeddedAVPlayerView: View {
-    let streamURL: URL  // http://localhost:PORT/stream.m3u8
+    let fileURL: URL  // original file
     @State private var player = AVPlayer()
 
     var body: some View {
         VideoPlayer(player: player)
             .onAppear {
-                player.replaceCurrentItem(with: AVPlayerItem(url: streamURL))
+                player.replaceCurrentItem(with: AVPlayerItem(url: fileURL))
                 player.play()
             }
     }
@@ -107,15 +107,15 @@ struct EmbeddedAVPlayerView: View {
 
 **Pros:**
 - Native SwiftUI support via `VideoPlayer`
-- Zero external dependencies
+- Zero external dependencies for local playback
 - No crash issues - Apple's own framework
-- HLS playback works perfectly
+- Best quality/local performance (no transcode)
 - Proper system integration (AirPlay, Picture-in-Picture, etc.)
 
 **Cons:**
-- Limited to Apple-supported codecs (irrelevant since we transcode)
+- Limited to Apple-supported codecs (fallback: external mpv or start transcoder for casting)
 
-**Status**: ✅ **Best option** - should be implemented.
+**Status**: ✅ **Best option** - implement for local; start transcoder only when casting.
 
 ---
 
@@ -298,7 +298,7 @@ Embedded mpv playback via NSOpenGLView doesn't work in SwiftUI because **NSOpenG
 
 | Option | Stability | Effort | Future-Proof |
 |--------|-----------|--------|--------------|
-| **1. AVPlayer + HLS** | ✅ Stable | Low | ✅ Yes |
+| **1. AVPlayer (local file) + on-demand transcode for Chromecast** | ✅ Stable | Medium | ✅ Yes |
 | **2. MPVKit Metal** | ⚠️ Experimental | High | ✅ Yes |
 | **3. Separate Window** | ✅ Stable | Medium | 🔶 Okay |
 | **4. CAOpenGLLayer** | 🔶 Has quirks | Medium | ❌ Deprecated |
@@ -307,7 +307,7 @@ Embedded mpv playback via NSOpenGLView doesn't work in SwiftUI because **NSOpenG
 
 ### Recommendation
 
-**Start with AVPlayer + HLS** (Option 1). We already transcode to HLS, AVPlayer is native SwiftUI, zero dependencies, and just works.
+**Start with AVPlayer local playback + on-demand transcoder for Chromecast** (Option 1). AVPlayer is native SwiftUI, zero dependencies, and keeps local playback on the original file; start the transcoder only when casting.
 
 **If mpv-specific features are needed** (codec support, advanced playback), try CAOpenGLLayer (Option 4) as it directly fixes the layer-backing crash, though OpenGL is deprecated.
 
