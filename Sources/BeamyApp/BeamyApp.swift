@@ -7,6 +7,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     nonisolated(unsafe) static var viewModel: CastingViewModel?
     nonisolated(unsafe) static var pendingURL: URL?
     @MainActor private static var aboutWindowController: NSWindowController?
+    private var menusStable = false
 
     private func log(_ message: String) {
         let data = "\(message)\n".data(using: .utf8)!
@@ -71,34 +72,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Activate the app and bring to front
         NSApp.activate(ignoringOtherApps: true)
         log("[AppDelegate] activated app")
+
+        // Remove unwanted menus after a short delay to ensure they're ready
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.removeUnwantedMenus()
+        }
+    }
+
+    @discardableResult
+    private func removeUnwantedMenus() -> Bool {
+        guard let mainMenu = NSApp.mainMenu else { return false }
+
+        let menusToRemove = ["File", "Edit", "View", "Window", "Help"]
+        var foundAny = false
+
+        for menuTitle in menusToRemove {
+            if let menuItem = mainMenu.item(withTitle: menuTitle) {
+                mainMenu.removeItem(menuItem)
+                foundAny = true
+            }
+        }
+
+        // Return true if stable (no menus found)
+        return !foundAny
     }
 
     func applicationWillUpdate(_ notification: Notification) {
-        if let mainMenu = NSApp.mainMenu {
-            // Remove File menu
-            if let fileMenuItem = mainMenu.item(withTitle: "File") {
-                mainMenu.removeItem(fileMenuItem)
-            }
+        // Stop checking once menus are stable (no more recreations)
+        guard !menusStable else { return }
 
-            // Remove Edit menu
-            if let editMenuItem = mainMenu.item(withTitle: "Edit") {
-                mainMenu.removeItem(editMenuItem)
-            }
-
-            // Remove View menu
-            if let viewMenuItem = mainMenu.item(withTitle: "View") {
-                mainMenu.removeItem(viewMenuItem)
-            }
-
-            // Remove Window menu
-            if let windowMenuItem = mainMenu.item(withTitle: "Window") {
-                mainMenu.removeItem(windowMenuItem)
-            }
-
-            // Remove Help menu
-            if let helpMenuItem = mainMenu.item(withTitle: "Help") {
-                mainMenu.removeItem(helpMenuItem)
-            }
+        if removeUnwantedMenus() {
+            menusStable = true
+            log("[AppDelegate] Menus now stable")
         }
     }
 
