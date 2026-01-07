@@ -9,6 +9,7 @@ public final class TranscodeServer: @unchecked Sendable {
     private let mediaInfo: MediaInfo
     private let hlsDirectory: URL
     private let playlistFilename = "stream.m3u8"
+    private let embeddedMode: Bool
 
     private var serverSocket: Int32 = -1
     private var isRunning = false
@@ -36,10 +37,17 @@ public final class TranscodeServer: @unchecked Sendable {
         URL(string: "http://\(getLocalIPAddress()):\(port)/\(playlistFilename)")!
     }
 
-    public init(input: URL, port: Int, mediaInfo: MediaInfo) throws {
+    /// Create a new transcode server.
+    /// - Parameters:
+    ///   - input: The video file to transcode
+    ///   - port: HTTP port to serve HLS on
+    ///   - mediaInfo: Media info from ffprobe
+    ///   - embeddedMode: If true, uses HLS settings optimized for embedded playback (keeps all segments, allows seeking from start). If false, uses live stream settings for Chromecast.
+    public init(input: URL, port: Int, mediaInfo: MediaInfo, embeddedMode: Bool = false) throws {
         self.input = input
         self.port = port
         self.mediaInfo = mediaInfo
+        self.embeddedMode = embeddedMode
         self.hlsDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("beamy-hls-\(UUID().uuidString)", isDirectory: true)
         signal(SIGPIPE, SIG_IGN)
         try startServer()
@@ -120,7 +128,9 @@ public final class TranscodeServer: @unchecked Sendable {
         guard let firstLine = request.split(whereSeparator: \.isNewline).first else { return }
         let parts = firstLine.split(separator: " ")
         guard parts.count >= 2 else { return }
-        var path = String(parts[1])
+
+        // Strip query parameters so cache-busted URLs (e.g., stream.m3u8?t=123) map to the on-disk file
+        var path = String(parts[1].split(separator: "?", maxSplits: 1).first ?? "")
         if path == "/" { path = "/\(playlistFilename)" }
 
         // Basic path sanitization
@@ -251,8 +261,24 @@ public final class TranscodeServer: @unchecked Sendable {
             args += [
                 "-force_key_frames", "expr:gte(t,n_forced*2)",
                 "-hls_time", "2",
-                "-hls_list_size", "6",
-                "-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
+            ]
+
+            if embeddedMode {
+                // Embedded mode: keep all segments, VOD-style playlist for proper seeking
+                args += [
+                    "-hls_list_size", "0",  // Keep all segments in playlist
+                    "-hls_playlist_type", "event",  // EVENT type allows appending but keeps history
+                    "-hls_flags", "append_list+program_date_time",
+                ]
+            } else {
+                // Live/Chromecast mode: sliding window, delete old segments
+                args += [
+                    "-hls_list_size", "6",
+                    "-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
+                ]
+            }
+
+            args += [
                 "-hls_segment_filename", segmentPath,
                 playlistPath
             ]

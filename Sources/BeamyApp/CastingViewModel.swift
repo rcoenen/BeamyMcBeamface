@@ -40,11 +40,20 @@ class CastingViewModel: ObservableObject {
     @Published var useEmbeddedPlayer: Bool = true  // AVPlayer embedded playback
 
     // Embedded player state (for AVPlayerView binding)
-    @Published var embeddedIsPlaying: Bool = false
+    @Published var embeddedIsPlaying: Bool = false {
+        didSet {
+            // Update status message when playback state changes
+            if useEmbeddedPlayer && outputType == .mpv && currentFile != nil {
+                statusMessage = embeddedIsPlaying ? "Playing" : "Paused"
+            }
+        }
+    }
     @Published var embeddedCurrentTime: TimeInterval = 0
     @Published var embeddedDuration: TimeInterval = 0
 
     @Published var transcodeServer: TranscodeServer?
+    @Published var isStreamReady: Bool = false  // True when HLS stream is actually available
+    @Published private(set) var isArbitrarySeeking: Bool = false
 
     // MARK: Internal State
     private var playerHandle: PlayerHandle?
@@ -55,7 +64,10 @@ class CastingViewModel: ObservableObject {
     private var lastKnownPosition: TimeInterval = 0
     private var lastKnownPaused: Bool = true
     private var chromecastSeekOffset: TimeInterval = 0
+    private var embeddedSeekOffset: TimeInterval = 0
     var embeddedPlayerCoordinator: AVPlayerView.Coordinator?
+    var mpvPlayerCoordinator: MpvPlayerView.Coordinator?
+    var hlsWebPlayerCoordinator: HLSWebPlayerView.Coordinator?
 
     // MARK: Computed Properties (query Player, not TranscodeServer)
 
@@ -71,7 +83,7 @@ class CastingViewModel: ObservableObject {
     var currentTime: TimeInterval {
         // For embedded AVPlayer, use the binding state
         if useEmbeddedPlayer && outputType == .mpv {
-            return embeddedCurrentTime
+            return embeddedSeekOffset + embeddedCurrentTime
         }
         guard let player = playerHandle?.player else { return lastKnownPosition }
 
@@ -84,10 +96,7 @@ class CastingViewModel: ObservableObject {
     }
 
     var effectiveDuration: TimeInterval {
-        // For embedded mpv, use the binding state if available
-        if useEmbeddedPlayer && outputType == .mpv && embeddedDuration > 0 {
-            return embeddedDuration
-        }
+        // For embedded mode, use mediaInfo duration (not HLS stream duration which resets on seeks)
         return duration
     }
 
@@ -187,25 +196,39 @@ class CastingViewModel: ObservableObject {
             return
         }
 
+        print("DEBUG: handleFileDrop called with \(url.lastPathComponent)")
         stopPlayback()
         errorMessage = nil
         currentFile = url
         statusMessage = "Loading..."
+        embeddedSeekOffset = 0
 
-        // Run ffprobe off the main actor to avoid UI hangs
+        // Get media info first
         Task.detached { [weak self] in
             guard let self else { return }
+            print("DEBUG: Starting ffprobe...")
             do {
                 let info = try FFmpeg.getMediaInfo(file: url)
+                print("DEBUG: ffprobe done, duration: \(info.duration)")
                 await MainActor.run {
                     self.mediaInfo = info
                     self.duration = info.duration
                     self.embeddedDuration = info.duration
-                    self.startTranscoder()
-                    self.statusMessage = "Playing embedded"
                     self.embeddedIsPlaying = true
+
+                    // For embedded playback, set isStreamReady immediately
+                    // The WebView will trigger transcoder start when it's ready
+                    if self.useEmbeddedPlayer && self.outputType == .mpv {
+                        self.statusMessage = "Ready"
+                        self.isStreamReady = true  // Show WebView, it will call startTranscoderForEmbedded
+                    } else {
+                        // External player path - start transcoder now
+                        self.startTranscoder()
+                        self.statusMessage = "Transcoding..."
+                    }
                 }
             } catch {
+                print("DEBUG: ffprobe error: \(error)")
                 await MainActor.run {
                     self.errorMessage = "Failed to read media info: \(error.localizedDescription)"
                     self.statusMessage = "Drop a video file to start"
@@ -215,15 +238,39 @@ class CastingViewModel: ObservableObject {
         }
     }
 
+    /// Called by WebView when it's ready to receive the stream
+    func startTranscoderForEmbedded() {
+        guard useEmbeddedPlayer && outputType == .mpv else { return }
+        guard transcodeServer == nil else { return }  // Already running
+        guard let url = currentFile, let info = mediaInfo else { return }
+
+        print("DEBUG: Starting transcoder for embedded playback (embeddedMode=true)")
+        let port = findAvailablePort()
+
+        do {
+            // Use embeddedMode for proper seeking from start
+            let server = try TranscodeServer(input: url, port: port, mediaInfo: info, embeddedMode: true)
+            self.transcodeServer = server
+            statusMessage = "Buffering..."
+            embeddedSeekOffset = 0
+        } catch {
+            errorMessage = "Failed to start transcoder: \(error.localizedDescription)"
+        }
+    }
+
     private func startTranscoder() {
         guard let url = currentFile, let info = mediaInfo else { return }
 
         let port = findAvailablePort()
+        isStreamReady = false
 
         do {
             let server = try TranscodeServer(input: url, port: port, mediaInfo: info)
             self.transcodeServer = server
-            statusMessage = "Transcoder running"
+            statusMessage = "Starting transcoder..."
+
+            // Poll until HLS stream is ready
+            pollForStreamReady(url: server.url)
 
             // Position timer only needed for external players (Chromecast)
             if outputType == .chromecast {
@@ -231,6 +278,39 @@ class CastingViewModel: ObservableObject {
             }
         } catch {
             errorMessage = "Failed to start transcoder: \(error.localizedDescription)"
+        }
+    }
+
+    private func pollForStreamReady(url: URL) {
+        // Only used for external players (Chromecast)
+        Task {
+            var attempts = 0
+            let maxAttempts = 60
+
+            while attempts < maxAttempts {
+                do {
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "HEAD"
+                    request.timeoutInterval = 2
+                    let (_, response) = try await URLSession.shared.data(for: request)
+
+                    if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                        await MainActor.run {
+                            print("DEBUG: Stream ready for external player")
+                            self.isStreamReady = true
+                            self.statusMessage = "Ready"
+                        }
+                        return
+                    }
+                } catch { }
+
+                attempts += 1
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+
+            await MainActor.run {
+                self.errorMessage = "Timeout waiting for stream"
+            }
         }
     }
 
@@ -466,9 +546,9 @@ class CastingViewModel: ObservableObject {
     // MARK: Playback Controls
 
     func togglePlayPause() {
-        // Embedded AVPlayer path
+        // Embedded HLS WebView path
         if useEmbeddedPlayer && outputType == .mpv {
-            embeddedPlayerCoordinator?.togglePause()
+            hlsWebPlayerCoordinator?.togglePause()
             return
         }
 
@@ -509,33 +589,20 @@ class CastingViewModel: ObservableObject {
 
     func skipForward() {
         let target = currentTime + 10
-        if useEmbeddedPlayer && outputType == .mpv {
-            let clamped = min(target, effectiveDuration)
-            embeddedPlayerCoordinator?.seek(to: clamped)
-            embeddedCurrentTime = clamped
-        } else {
-            seek(to: target)
-        }
+        seek(to: target)
     }
 
     func skipBackward() {
         let target = max(0, currentTime - 10)
-        if useEmbeddedPlayer && outputType == .mpv {
-            embeddedPlayerCoordinator?.seek(to: target)
-            embeddedCurrentTime = target
-        } else {
-            seek(to: target)
-        }
+        seek(to: target)
     }
 
     func seek(to time: TimeInterval) {
         let dur = useEmbeddedPlayer && outputType == .mpv ? effectiveDuration : duration
         let clamped = min(max(0, time), dur)
 
-        // For embedded AVPlayer, control via coordinator
         if useEmbeddedPlayer && outputType == .mpv {
-            embeddedPlayerCoordinator?.seek(to: clamped)
-            embeddedCurrentTime = clamped
+            performEmbeddedSeek(to: clamped)
             return
         }
 
@@ -564,6 +631,67 @@ class CastingViewModel: ObservableObject {
         seek(to: progress * dur)
     }
 
+    // MARK: Embedded Seeking (WebView)
+
+    private func performEmbeddedSeek(to time: TimeInterval) {
+        guard let server = transcodeServer else {
+            // No server yet; just update the WebView position if possible.
+            let localTime = max(0, time - embeddedSeekOffset)
+            hlsWebPlayerCoordinator?.seek(to: localTime)
+            embeddedCurrentTime = localTime
+            return
+        }
+
+        // Allow a small buffer so near-edge seeks don't restart FFmpeg unnecessarily.
+        let transcodedUpTo = embeddedSeekOffset + server.currentPosition
+        let isBeforeCurrentStream = time < embeddedSeekOffset - 0.5
+        let isAfterCurrentStream = time > transcodedUpTo + 2.0
+        let isArbitrary = isBeforeCurrentStream || isAfterCurrentStream
+
+        if isArbitrary {
+            performEmbeddedArbitrarySeek(to: time, server: server)
+        } else {
+            performEmbeddedLocalSeek(to: time)
+        }
+    }
+
+    private func performEmbeddedLocalSeek(to time: TimeInterval) {
+        let localTime = max(0, time - embeddedSeekOffset)
+        hlsWebPlayerCoordinator?.seek(to: localTime)
+        embeddedCurrentTime = localTime
+        isArbitrarySeeking = false
+    }
+
+    private func performEmbeddedArbitrarySeek(to time: TimeInterval, server: TranscodeServer) {
+        isArbitrarySeeking = true
+        statusMessage = "Seeking..."
+        embeddedCurrentTime = time
+        embeddedSeekOffset = time
+
+        // Restart transcoder at target position and reload WebView with cache-busted URL.
+        server.seek(to: time, awaitClientReconnect: false)
+        let cacheBustedURL = cacheBustURL(server.url)
+        hlsWebPlayerCoordinator?.pollAndLoad(url: cacheBustedURL)
+    }
+
+    private func cacheBustURL(_ url: URL) -> URL {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let timestamp = Date().timeIntervalSince1970
+        let item = URLQueryItem(name: "t", value: String(format: "%.3f", timestamp))
+        if components?.queryItems != nil {
+            components?.queryItems?.append(item)
+        } else {
+            components?.queryItems = [item]
+        }
+        return components?.url ?? url
+    }
+
+    func embeddedPlaybackStarted() {
+        isArbitrarySeeking = false
+        isStreamReady = true
+        statusMessage = "Playing"
+    }
+
     // MARK: Cleanup
 
     private func cleanupPlayer() {
@@ -573,16 +701,20 @@ class CastingViewModel: ObservableObject {
 
     func stopPlayback() {
         cleanupPlayer()
+        mpvPlayerCoordinator?.stop()
+        mpvPlayerCoordinator = nil
         positionTimer?.invalidate()
         positionTimer = nil
         transcodeServer?.stop()
         transcodeServer = nil
+        isStreamReady = false
         lastKnownPosition = 0
         lastKnownPaused = true
         chromecastSeekOffset = 0
         embeddedIsPlaying = false
         embeddedCurrentTime = 0
         embeddedDuration = 0
+        embeddedSeekOffset = 0
         currentFile = nil
         mediaInfo = nil
         duration = 0
