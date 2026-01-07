@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 /// A simple HTTP server that serves a static promo image for Chromecast idle screen
-public final class PromoImageServer: @unchecked Sendable {
+public final class ImageServer: @unchecked Sendable {
     private let port: Int
     private let imageData: Data
     private var serverSocket: Int32 = -1
@@ -17,7 +17,7 @@ public final class PromoImageServer: @unchecked Sendable {
 
         // Load the promo image
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: imagePath)) else {
-            throw PromoImageServerError.imageLoadFailed
+            throw ImageServerError.imageLoadFailed
         }
         self.imageData = data
 
@@ -28,7 +28,7 @@ public final class PromoImageServer: @unchecked Sendable {
     private func startServer() throws {
         serverSocket = socket(AF_INET, SOCK_STREAM, 0)
         guard serverSocket >= 0 else {
-            throw PromoImageServerError.socketCreationFailed
+            throw ImageServerError.socketCreationFailed
         }
 
         var reuse: Int32 = 1
@@ -47,12 +47,12 @@ public final class PromoImageServer: @unchecked Sendable {
 
         guard bindResult >= 0 else {
             close(serverSocket)
-            throw PromoImageServerError.bindFailed(port)
+            throw ImageServerError.bindFailed(port)
         }
 
         guard listen(serverSocket, 16) >= 0 else {
             close(serverSocket)
-            throw PromoImageServerError.listenFailed
+            throw ImageServerError.listenFailed
         }
 
         isRunning = true
@@ -135,7 +135,7 @@ public final class PromoImageServer: @unchecked Sendable {
     }
 }
 
-enum PromoImageServerError: Error {
+enum ImageServerError: Error {
     case imageLoadFailed
     case socketCreationFailed
     case bindFailed(Int)

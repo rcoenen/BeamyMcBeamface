@@ -80,7 +80,7 @@ class CastingViewModel: ObservableObject {
     private var playerHandle: PlayerHandle?
     private var positionTimer: Timer?
     private var isLoadingConfig = false
-    private var promoImageServer: PromoImageServer?
+    private var imageServer: ImageServer?
     private var promoCastClient: CastV2Client?  // Keep promo client alive
 
     // Position tracking
@@ -818,14 +818,14 @@ class CastingViewModel: ObservableObject {
         Task {
             do {
                 // Start promo image server if not already running
-                if promoImageServer == nil {
+                if imageServer == nil {
                     // Use absolute path to the backdrop image in source tree
                     let backdropPath = "/Users/rob/Dev/Beamy/assets/backdrop_1920x1080.jpg"
                     print("[PROMO] Starting image server with path: \(backdropPath)")
-                    promoImageServer = try PromoImageServer(imagePath: backdropPath, port: 8081)
+                    imageServer = try ImageServer(imagePath: backdropPath, port: 8081)
                 }
 
-                guard let promoServer = promoImageServer else {
+                guard let promoServer = imageServer else {
                     print("[PROMO] ERROR: promoServer is nil after init")
                     return
                 }
@@ -884,8 +884,8 @@ class CastingViewModel: ObservableObject {
         positionTimer = nil
         transcodeServer?.stop()
         transcodeServer = nil
-        promoImageServer?.stop()
-        promoImageServer = nil
+        imageServer?.stop()
+        imageServer = nil
         // Don't disconnect promo client here - let new video client take over the session
         // Disconnecting would stop the receiver since it's the only sender
         print("DEBUG: setting promoCastClient = nil (NOT calling disconnect)")
@@ -954,8 +954,8 @@ class CastingViewModel: ObservableObject {
         positionTimer = nil
         transcodeServer?.stop()
         transcodeServer = nil
-        promoImageServer?.stop()
-        promoImageServer = nil
+        imageServer?.stop()
+        imageServer = nil
         isStreamReady = false
         lastKnownPosition = 0
         lastKnownPaused = true
