@@ -483,12 +483,15 @@ class CastingViewModel: ObservableObject {
             cleanupPlayer()
             print("DEBUG: cleanupPlayer() done")
 
+            // Restart transcoder at captured position (FFmpeg has transcoded ahead)
+            if let server = transcodeServer {
+                print("DEBUG: Restarting transcoder at position \(position)")
+                server.seek(to: position, awaitClientReconnect: false)
+                embeddedSeekOffset = position
+            }
+
             // Switch to embedded
             outputType = newOutput
-
-            // Seek embedded player to captured position
-            print("DEBUG: Seeking embedded to \(position)")
-            seek(to: position)
 
             statusMessage = "Playing embedded"
             print("DEBUG: Switch complete")
