@@ -904,6 +904,42 @@ class CastingViewModel: ObservableObject {
         statusMessage = "Drop a video file to start"
     }
 
+    /// Stop playback and return to initial state, showing promo on Chromecast if connected
+    func stopAndReset() {
+        print("DEBUG: stopAndReset() called")
+
+        // Stop current playback
+        cleanupPlayer()
+        mpvPlayerCoordinator?.stop()
+        mpvPlayerCoordinator = nil
+        positionTimer?.invalidate()
+        positionTimer = nil
+        transcodeServer?.stop()
+        transcodeServer = nil
+
+        // Reset playback state
+        isStreamReady = false
+        lastKnownPosition = 0
+        lastKnownPaused = true
+        chromecastSeekOffset = 0
+        embeddedIsPlaying = false
+        embeddedCurrentTime = 0
+        embeddedDuration = 0
+        embeddedSeekOffset = 0
+        currentFile = nil
+        mediaInfo = nil
+        duration = 0
+
+        // If on Chromecast, re-show the promo image
+        if outputType == .chromecast, selectedDevice != nil {
+            print("DEBUG: Re-showing promo on Chromecast")
+            showPromoOnChromecast()
+            statusMessage = "Ready - Drop a video file to start"
+        } else {
+            statusMessage = "Drop a video file to start"
+        }
+    }
+
     /// Called when app terminates - stops the receiver to clear Chromecast screen
     func terminatePlayback() {
         // Stop receiver to clear Chromecast screen on quit

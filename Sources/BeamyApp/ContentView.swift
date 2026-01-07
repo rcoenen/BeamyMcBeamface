@@ -136,6 +136,14 @@ struct PlaybackControlsView: View {
                 }
                 .buttonStyle(.borderless)
 
+                // Stop button
+                Button(action: { viewModel.stopAndReset() }) {
+                    Image(systemName: "stop.fill")
+                        .font(.title2)
+                }
+                .buttonStyle(.borderless)
+                .help("Stop playback")
+
                 Spacer()
 
                 // Time remaining
