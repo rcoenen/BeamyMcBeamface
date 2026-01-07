@@ -143,7 +143,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let windowSize = NSSize(width: 450, height: 410)
+        let windowSize = NSSize(width: 450, height: 520)
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: windowSize),
             styleMask: [.titled, .closable],
@@ -151,7 +151,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.center()
-        window.title = "About Beamy"
+        window.title = "About Beamy McBeamface"
         window.isReleasedWhenClosed = false
 
         // Set size constraints to prevent resizing
@@ -260,7 +260,7 @@ struct BeamyApp: App {
         .defaultSize(width: 760, height: 480)
         .commands {
             CommandGroup(replacing: .appInfo) {
-                Button("About Beamy") {
+                Button("About Beamy McBeamface") {
                     AppDelegate.showAboutWindow()
                 }
             }
@@ -298,31 +298,59 @@ private struct AboutView: View {
     }
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 12) {
             Image(nsImage: icon)
                 .resizable()
                 .interpolation(.high)
-                .frame(width: 256, height: 256)
+                .frame(width: 200, height: 200)
                 .shadow(radius: 8)
 
-            Text("Beamy")
-                .font(.system(size: 36, weight: .semibold))
+            Text("Beamy McBeamface")
+                .font(.system(size: 32, weight: .semibold))
 
-            if !versionString.isEmpty {
-                Text(versionString)
+            Text("Version 0.1")
                 .font(.system(.body, design: .monospaced))
-                    .foregroundColor(.secondary)
-            }
-
-            Text("Fast transcoding and casting for your local videos.")
-                .font(.body)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 360)
                 .foregroundColor(.secondary)
 
+            Divider()
+                .frame(width: 300)
+                .padding(.vertical, 4)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
+                    Text("🇪🇺")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("To beam")
+                            .font(.headline) +
+                        Text(" (proper Euro-English)")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Text("verb — to \"beam\" (project) something using a \"beamer\" (projector).")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("In the age of streaming: beaming is streaming.")
+                            .font(.caption)
+                            .italic()
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Text("Beamy McBeamface beams whatever to wherever")
+                    .font(.callout)
+                    .padding(.top, 4)
+                Text("(yeah sorry, just Chromecast for now — Apple TV will be added)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: 340, alignment: .leading)
+
             Spacer()
+
+            Text("This is Free & Open Source software.")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
-        .padding(32)
+        .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color(nsColor: .windowBackgroundColor))
     }
