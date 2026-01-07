@@ -18,6 +18,9 @@ build/
 .gemini/
 .opencode/
 
+# OpenSpec
+openspec/
+
 # Test files
 Sources/TestChromecast/
 test-chromecast.swift
