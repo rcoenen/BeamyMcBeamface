@@ -9,25 +9,14 @@ let package = Package(
     ],
     products: [
         .library(name: "BeamyKit", targets: ["BeamyKit"]),
-        .library(name: "Clibmpv", targets: ["Clibmpv"]),
     ],
     dependencies: [
         .package(url: "https://github.com/LebJe/TOMLKit", from: "0.5.0"),
     ],
     targets: [
-        // C wrapper for libmpv
-        .systemLibrary(
-            name: "Clibmpv",
-            pkgConfig: "mpv",
-            providers: [
-                .brew(["mpv"])
-            ]
-        ),
-        // Shared library
         .target(
             name: "BeamyKit",
             dependencies: [
-                "Clibmpv",
                 .product(name: "TOMLKit", package: "TOMLKit"),
             ]
         ),
