@@ -73,6 +73,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         log("[AppDelegate] activated app")
     }
 
+    func applicationWillUpdate(_ notification: Notification) {
+        if let mainMenu = NSApp.mainMenu {
+            // Remove File menu
+            if let fileMenuItem = mainMenu.item(withTitle: "File") {
+                mainMenu.removeItem(fileMenuItem)
+            }
+
+            // Remove Edit menu
+            if let editMenuItem = mainMenu.item(withTitle: "Edit") {
+                mainMenu.removeItem(editMenuItem)
+            }
+
+            // Remove View menu
+            if let viewMenuItem = mainMenu.item(withTitle: "View") {
+                mainMenu.removeItem(viewMenuItem)
+            }
+
+            // Remove Window menu
+            if let windowMenuItem = mainMenu.item(withTitle: "Window") {
+                mainMenu.removeItem(windowMenuItem)
+            }
+
+            // Remove Help menu
+            if let helpMenuItem = mainMenu.item(withTitle: "Help") {
+                mainMenu.removeItem(helpMenuItem)
+            }
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         log("[AppDelegate] applicationWillTerminate")
 
