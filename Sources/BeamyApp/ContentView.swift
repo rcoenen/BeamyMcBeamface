@@ -73,6 +73,19 @@ struct PlaybackControlsView: View {
                         .frame(width: 12, height: 12)
                         .shadow(radius: 2)
                         .offset(x: geometry.size.width * (isDragging ? dragProgress : viewModel.progress) - 6)
+
+                    // Time overlay while dragging
+                    if isDragging {
+                        let targetTime = dragProgress * viewModel.effectiveDuration
+                        Text(CastingViewModel.formatTime(targetTime))
+                            .font(.system(.caption, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .cornerRadius(4)
+                            .shadow(radius: 3)
+                            .offset(x: min(max(geometry.size.width * dragProgress - 35, 0), geometry.size.width - 70), y: -30)
+                    }
                 }
                 .frame(height: 12)
                 .contentShape(Rectangle())
@@ -167,7 +180,7 @@ struct ContentView: View {
                         viewModel.switchOutput(to: newValue)
                     }
                 )) {
-                    Text("mpv").tag(OutputType.mpv)
+                    Text("Beamy").tag(OutputType.mpv)
                     Text("Chromecast").tag(OutputType.chromecast)
                 }
                 .pickerStyle(.segmented)
@@ -207,13 +220,20 @@ struct ContentView: View {
                     }
                 }
 
+                // Beamy logo
+                Image("BeamyLogo")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: 56)
+
                 Button(action: { showSettings = true }) {
                     Image(systemName: "gearshape")
                 }
                 .buttonStyle(.borderless)
             }
-            .padding(.horizontal)
-            .frame(height: 50)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(height: 80)
             .background(Color(nsColor: .controlBackgroundColor))
             .sheet(isPresented: $showSettings) {
                 SettingsView()
@@ -231,17 +251,35 @@ struct ContentView: View {
                     VStack(spacing: 0) {
                         // Main content area - embedded player or info display
                         if viewModel.useEmbeddedPlayer && viewModel.outputType == .mpv {
-                            // Embedded AVPlayer consuming transcoded stream
-                            AVPlayerView(
-                                url: viewModel.transcodeServer?.url,
-                                isPlaying: $viewModel.embeddedIsPlaying,
-                                currentTime: $viewModel.embeddedCurrentTime,
-                                duration: $viewModel.embeddedDuration,
-                                onCoordinatorReady: { coordinator in
-                                    viewModel.embeddedPlayerCoordinator = coordinator
-                                }
-                            )
-                            .background(Color.black)
+                            // Embedded WebView with HLS consuming transcoded stream
+                            if viewModel.isStreamReady {
+                                HLSWebPlayerView(
+                                    url: viewModel.transcodeServer?.url,
+                                    isPlaying: $viewModel.embeddedIsPlaying,
+                                    currentTime: $viewModel.embeddedCurrentTime,
+                                    duration: $viewModel.embeddedDuration,
+                                    onCoordinatorReady: { coordinator in
+                                        viewModel.hlsWebPlayerCoordinator = coordinator
+                                        coordinator.onPlaybackStarted = {
+                                            viewModel.embeddedPlaybackStarted()
+                                        }
+                                        // Start transcoder now that WebView is ready
+                                        viewModel.startTranscoderForEmbedded()
+                                    }
+                                )
+                                .background(Color.black)
+                            } else {
+                                // Show loading state while getting media info
+                                Color.black
+                                    .overlay(
+                                        VStack(spacing: 12) {
+                                            ProgressView()
+                                                .scaleEffect(1.5)
+                                            Text(viewModel.statusMessage)
+                                                .foregroundColor(.white)
+                                        }
+                                    )
+                            }
                         } else {
                             // Non-embedded mode: file info and status
                             VStack(spacing: 16) {
