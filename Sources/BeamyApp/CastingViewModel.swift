@@ -83,7 +83,7 @@ class CastingViewModel: ObservableObject {
     private var promoImageServer: PromoImageServer?
     private var promoCastClient: CastV2Client?  // Keep promo client alive
 
-    // Position tracking (like TUI)
+    // Position tracking
     private var lastKnownPosition: TimeInterval = 0
     private var lastKnownPaused: Bool = true
     private var chromecastSeekOffset: TimeInterval = 0
@@ -110,7 +110,7 @@ class CastingViewModel: ObservableObject {
         }
         guard let player = playerHandle?.player else { return lastKnownPosition }
 
-        // For Chromecast LIVE streams, add seek offset (like TUI)
+        // For Chromecast LIVE streams, add seek offset
         if player is ChromecastPlayer, let playerTime = try? player.getPosition() {
             return chromecastSeekOffset + playerTime
         }
@@ -405,7 +405,7 @@ class CastingViewModel: ObservableObject {
         return result >= 0
     }
 
-    // MARK: Position Timer (250ms polling like TUI)
+    // MARK: Position Timer (250ms polling)
 
     private func startPositionTimer() {
         if useEmbeddedPlayer && outputType == .mpv {

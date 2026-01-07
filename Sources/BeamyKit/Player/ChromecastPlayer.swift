@@ -73,7 +73,7 @@ public final class ChromecastPlayer: Player {
         let status = try currentStatus()
         try commandSender("PAUSE", status.mediaSessionId, [:])
 
-        // Validate pause completed (silent - TUI drift detection will catch issues)
+        // Validate pause completed
         _ = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
             updatedStatus.playerState == .paused
         }
@@ -83,7 +83,7 @@ public final class ChromecastPlayer: Player {
         let status = try currentStatus()
         try commandSender("PLAY", status.mediaSessionId, [:])
 
-        // Validate resume completed (silent - TUI drift detection will catch issues)
+        // Validate resume completed
         _ = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
             updatedStatus.playerState == .playing
         }
@@ -93,7 +93,7 @@ public final class ChromecastPlayer: Player {
         let status = try currentStatus()
         try commandSender("SEEK", status.mediaSessionId, ["currentTime": time])
 
-        // Validate seek completed (silent - TUI drift detection will catch issues)
+        // Validate seek completed
         // Tolerance: ±2s, timeout: 3s
         _ = waitForStatusUpdate(timeout: 3.0) { updatedStatus in
             abs(updatedStatus.currentTime - time) < 2.0
