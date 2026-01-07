@@ -17,8 +17,8 @@ build/
 .gemini/
 .opencode/
 
-# OpenSpec
-openspec/
+# OpenSpec (tracked for rollback)
+# openspec/
 
 # Test files
 Sources/TestChromecast/
