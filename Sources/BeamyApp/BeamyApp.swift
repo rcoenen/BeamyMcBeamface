@@ -1,10 +1,12 @@
 import SwiftUI
 import BeamyKit
+import AppKit
 
 // AppDelegate to handle file opening from Finder/CLI
 class AppDelegate: NSObject, NSApplicationDelegate {
     nonisolated(unsafe) static var viewModel: CastingViewModel?
     nonisolated(unsafe) static var pendingURL: URL?
+    @MainActor private static var aboutWindowController: NSWindowController?
 
     private func log(_ message: String) {
         let data = "\(message)\n".data(using: .utf8)!
@@ -45,6 +47,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         log("[AppDelegate] didFinishLaunching")
         log("[AppDelegate] args: \(ProcessInfo.processInfo.arguments)")
 
+        // Kill any orphaned FFmpeg processes from previous Beamy sessions
+        cleanupOrphanedTranscoders()
+
+        // Set larger app icon for About panel (4x size: 1024x1024)
+        if let appIcon = NSImage(named: "AppIcon") {
+            appIcon.size = NSSize(width: 1024, height: 1024)
+            NSApp.applicationIconImage = appIcon
+        }
+
+        hookAboutMenu()
+
         // Check for file arguments (skip first which is app path)
         let args = ProcessInfo.processInfo.arguments
         for arg in args.dropFirst() {
@@ -58,6 +71,96 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Activate the app and bring to front
         NSApp.activate(ignoringOtherApps: true)
         log("[AppDelegate] activated app")
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        log("[AppDelegate] applicationWillTerminate")
+
+        // Clean up Chromecast connection and stop receiver to clear screen
+        // Called on main thread already, so just call directly
+        if let vm = Self.viewModel {
+            vm.terminatePlayback()
+            log("[AppDelegate] Cleaned up playback and stopped Chromecast receiver")
+        }
+    }
+
+    /// Redirects the default About menu item to our custom About window.
+    private func hookAboutMenu() {
+        guard let mainMenu = NSApp.mainMenu,
+              let appMenu = mainMenu.items.first?.submenu,
+              let aboutItem = appMenu.items.first else { return }
+        aboutItem.target = self
+        aboutItem.action = #selector(openCustomAbout)
+    }
+
+    @objc private func openCustomAbout(_ sender: Any?) {
+        Task { @MainActor in
+            AppDelegate.showAboutWindow()
+        }
+    }
+
+    @MainActor
+    static func showAboutWindow() {
+        // Reuse the window controller if it already exists.
+        if let controller = aboutWindowController {
+            controller.showWindow(nil)
+            controller.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let windowSize = NSSize(width: 450, height: 410)
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: windowSize),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.center()
+        window.title = "About Beamy"
+        window.isReleasedWhenClosed = false
+
+        // Set size constraints to prevent resizing
+        window.minSize = windowSize
+        window.maxSize = windowSize
+        window.contentMinSize = windowSize
+        window.contentMaxSize = windowSize
+
+        window.contentView = NSHostingView(rootView: AboutView())
+
+        let controller = NSWindowController(window: window)
+        aboutWindowController = controller
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func cleanupOrphanedTranscoders() {
+        log("[AppDelegate] Cleaning up orphaned transcoders...")
+
+        // Find and kill FFmpeg processes that were started by Beamy (have beamy-hls in path)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task.arguments = ["-f", "beamy-hls"]
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+            if task.terminationStatus == 0 {
+                log("[AppDelegate] Killed orphaned FFmpeg processes")
+            }
+        } catch {
+            log("[AppDelegate] pkill error: \(error)")
+        }
+
+        // Also clean up old temp directories
+        let tempDir = FileManager.default.temporaryDirectory
+        if let contents = try? FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil) {
+            for item in contents where item.lastPathComponent.hasPrefix("beamy-hls-") {
+                try? FileManager.default.removeItem(at: item)
+                log("[AppDelegate] Removed old temp dir: \(item.lastPathComponent)")
+            }
+        }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -122,54 +225,11 @@ struct BeamyApp: App {
         }
         .defaultSize(width: 760, height: 480)
         .commands {
-            // Playback commands
-            CommandMenu("Playback") {
-                Button("Play/Pause") {
-                    viewModel.togglePlayPause()
+            CommandGroup(replacing: .appInfo) {
+                Button("About Beamy") {
+                    AppDelegate.showAboutWindow()
                 }
-                .keyboardShortcut(.space, modifiers: [])
-
-                Divider()
-
-                Button("Skip Forward 10s") {
-                    viewModel.skipForward()
-                }
-                .keyboardShortcut(.rightArrow, modifiers: [])
-
-                Button("Skip Backward 10s") {
-                    viewModel.skipBackward()
-                }
-                .keyboardShortcut(.leftArrow, modifiers: [])
-
-                Divider()
-
-                Button("Stop") {
-                    viewModel.stopPlayback()
-                }
-                .keyboardShortcut("s", modifiers: [.command])
             }
-
-            // Output commands
-            CommandMenu("Output") {
-                Button("Switch to mpv") {
-                    viewModel.switchOutput(to: .mpv)
-                }
-                .keyboardShortcut("1", modifiers: [.command])
-
-                Button("Switch to Chromecast") {
-                    viewModel.switchOutput(to: .chromecast)
-                }
-                .keyboardShortcut("2", modifiers: [.command])
-            }
-
-            // Remove standard menus we don't need
-            CommandGroup(replacing: .newItem) { }
-            CommandGroup(replacing: .undoRedo) { }
-            CommandGroup(replacing: .pasteboard) { }
-            CommandGroup(replacing: .textEditing) { }
-            CommandGroup(replacing: .windowSize) { }
-            CommandGroup(replacing: .windowArrangement) { }
-            CommandGroup(replacing: .help) { }
         }
 
         // Menu bar extra
@@ -184,5 +244,52 @@ struct BeamyApp: App {
             SettingsView()
                 .environmentObject(viewModel)
         }
+    }
+}
+
+private struct AboutView: View {
+    private var icon: NSImage {
+        if let img = NSImage(named: "AppIcon")?.copy() as? NSImage {
+            img.size = NSSize(width: 256, height: 256) // icon for About window
+            return img
+        }
+        return NSImage(size: NSSize(width: 256, height: 256))
+    }
+
+    private var versionString: String {
+        let bundle = Bundle.main
+        let short = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        return [short, build].filter { !$0.isEmpty }.joined(separator: " (\(build))")
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(nsImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 256, height: 256)
+                .shadow(radius: 8)
+
+            Text("Beamy")
+                .font(.system(size: 36, weight: .semibold))
+
+            if !versionString.isEmpty {
+                Text(versionString)
+                .font(.system(.body, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+
+            Text("Fast transcoding and casting for your local videos.")
+                .font(.body)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+                .foregroundColor(.secondary)
+
+            Spacer()
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }

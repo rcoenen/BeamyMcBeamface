@@ -11,3 +11,4 @@ assets/test_with_timecode.mkv
 
 # XcodeGen output (regenerated from project.yml)
 *.xcodeproj
+build/

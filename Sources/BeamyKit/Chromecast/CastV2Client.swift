@@ -272,8 +272,32 @@ public final class CastV2Client: @unchecked Sendable {
         try sendMediaCommand(type: "GET_STATUS")
     }
 
+    /// Stop the receiver application (clears the screen)
+    public func stopMedia() throws {
+        guard let sessionId = sessionId else {
+            throw CastV2Error.notConnected
+        }
+
+        log("Sending STOP command to receiver...")
+        requestId += 1
+
+        let payload: [String: Any] = [
+            "type": "STOP",
+            "sessionId": sessionId,
+            "requestId": requestId
+        ]
+
+        try sendMessage(
+            namespace: nsReceiver,
+            destinationId: "receiver-0",
+            payload: payload
+        )
+        log("STOP command sent to receiver")
+    }
+
     public func disconnect() {
-        log("Disconnecting...")
+        log("Disconnecting... (called from)")
+        Thread.callStackSymbols.prefix(10).forEach { log("  \($0)") }
 
         // Send CLOSE to receiver
         if let transportId = transportId {
@@ -538,9 +562,6 @@ public final class CastV2Client: @unchecked Sendable {
         }
     }
 
-    deinit {
-        disconnect()
-    }
 }
 
 public enum CastV2Error: Error, CustomStringConvertible {

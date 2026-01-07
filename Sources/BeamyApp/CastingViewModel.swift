@@ -25,7 +25,13 @@ class CastingViewModel: ObservableObject {
 
     @Published var devices: [ChromecastDevice] = []
     @Published var selectedDevice: ChromecastDevice? {
-        didSet { saveSelectedDevice() }
+        didSet {
+            saveSelectedDevice()
+            // Show promo on Chromecast when device selected but no video loaded
+            if selectedDevice != nil && outputType == .chromecast && currentFile == nil {
+                showPromoOnChromecast()
+            }
+        }
     }
     @Published var currentFile: URL?
     @Published var mediaInfo: MediaInfo?
@@ -33,7 +39,22 @@ class CastingViewModel: ObservableObject {
     @Published var isDiscovering = false
     @Published var errorMessage: String?
     @Published var outputType: OutputType = .mpv {
-        didSet { saveOutputType() }
+        didSet {
+            saveOutputType()
+
+            // Show promo when switching TO Chromecast (if device selected but no video)
+            if outputType == .chromecast && selectedDevice != nil && currentFile == nil {
+                showPromoOnChromecast()
+            }
+
+            // Disconnect from Chromecast when switching TO Beamy
+            if outputType == .mpv {
+                try? promoCastClient?.stopMedia()
+                promoCastClient?.disconnect()
+                promoCastClient = nil
+                print("[OUTPUT] Disconnected from Chromecast (switched to Beamy)")
+            }
+        }
     }
     @Published var isSwitchingOutput = false
     @Published var statusMessage: String = "Drop a video file to start"
@@ -59,6 +80,8 @@ class CastingViewModel: ObservableObject {
     private var playerHandle: PlayerHandle?
     private var positionTimer: Timer?
     private var isLoadingConfig = false
+    private var promoImageServer: PromoImageServer?
+    private var promoCastClient: CastV2Client?  // Keep promo client alive
 
     // Position tracking (like TUI)
     private var lastKnownPosition: TimeInterval = 0
@@ -197,7 +220,14 @@ class CastingViewModel: ObservableObject {
         }
 
         print("DEBUG: handleFileDrop called with \(url.lastPathComponent)")
+        print("DEBUG: outputType=\(outputType), selectedDevice=\(selectedDevice?.name ?? "nil")")
+        print("DEBUG: promoCastClient exists: \(promoCastClient != nil)")
+
+        // Preserve Chromecast session when dropping new file - we'll reuse it
+        let preservedClient = (outputType == .chromecast) ? promoCastClient : nil
         stopPlayback()
+        promoCastClient = preservedClient
+        print("DEBUG: after stopPlayback, promoCastClient exists: \(promoCastClient != nil)")
         errorMessage = nil
         currentFile = url
         statusMessage = "Loading..."
@@ -259,14 +289,20 @@ class CastingViewModel: ObservableObject {
     }
 
     private func startTranscoder() {
-        guard let url = currentFile, let info = mediaInfo else { return }
+        guard let url = currentFile, let info = mediaInfo else {
+            print("DEBUG: startTranscoder - no currentFile or mediaInfo")
+            return
+        }
 
         let port = findAvailablePort()
         isStreamReady = false
 
+        print("DEBUG: startTranscoder - port=\(port), outputType=\(outputType)")
+
         do {
             let server = try TranscodeServer(input: url, port: port, mediaInfo: info)
             self.transcodeServer = server
+            print("DEBUG: startTranscoder - server created, url=\(server.url)")
             statusMessage = "Starting transcoder..."
 
             // Poll until HLS stream is ready
@@ -277,12 +313,14 @@ class CastingViewModel: ObservableObject {
                 startPositionTimer()
             }
         } catch {
+            print("DEBUG: startTranscoder - error: \(error)")
             errorMessage = "Failed to start transcoder: \(error.localizedDescription)"
         }
     }
 
     private func pollForStreamReady(url: URL) {
         // Only used for external players (Chromecast)
+        print("DEBUG: pollForStreamReady starting, url=\(url)")
         Task {
             var attempts = 0
             let maxAttempts = 60
@@ -294,20 +332,45 @@ class CastingViewModel: ObservableObject {
                     request.timeoutInterval = 2
                     let (_, response) = try await URLSession.shared.data(for: request)
 
-                    if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
-                        await MainActor.run {
-                            print("DEBUG: Stream ready for external player")
-                            self.isStreamReady = true
-                            self.statusMessage = "Ready"
+                    if let httpResponse = response as? HTTPURLResponse {
+                        print("DEBUG: pollForStreamReady attempt \(attempts) - status \(httpResponse.statusCode)")
+                        if httpResponse.statusCode == 200 {
+                            await MainActor.run {
+                                print("DEBUG: Stream ready! outputType=\(self.outputType), selectedDevice=\(self.selectedDevice?.name ?? "nil"), playerHandle=\(self.playerHandle != nil)")
+                                self.isStreamReady = true
+                                self.statusMessage = "Ready"
+
+                                // Auto-start Chromecast playback when stream is ready
+                                if self.outputType == .chromecast && self.selectedDevice != nil && self.playerHandle == nil {
+                                    print("DEBUG: Auto-starting Chromecast playback!")
+                                    Task {
+                                        do {
+                                            try await self.launchPlayer(output: .chromecast, seekTo: 0, paused: false)
+                                            self.statusMessage = "Playing via Chromecast"
+                                            print("DEBUG: Chromecast playback started successfully")
+                                        } catch {
+                                            print("DEBUG: Chromecast playback failed: \(error)")
+                                            self.errorMessage = "Failed to start Chromecast: \(error.localizedDescription)"
+                                        }
+                                    }
+                                } else {
+                                    print("DEBUG: NOT auto-starting - conditions not met")
+                                }
+                            }
+                            return
                         }
-                        return
                     }
-                } catch { }
+                } catch {
+                    if attempts % 10 == 0 {
+                        print("DEBUG: pollForStreamReady attempt \(attempts) - error: \(error.localizedDescription)")
+                    }
+                }
 
                 attempts += 1
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
 
+            print("DEBUG: pollForStreamReady TIMEOUT after \(maxAttempts) attempts")
             await MainActor.run {
                 self.errorMessage = "Timeout waiting for stream"
             }
@@ -356,18 +419,34 @@ class CastingViewModel: ObservableObject {
         }
     }
 
+    private var pollFailCount = 0
+
     private func pollPosition() {
         guard let player = playerHandle?.player else {
             statusMessage = transcodeServer != nil ? "Ready - press Play" : "Drop a video file to start"
+            // Kill zombie timer if no player
+            positionTimer?.invalidate()
+            positionTimer = nil
             return
         }
 
         // Update position from player
         if let position = try? player.getPosition() {
+            pollFailCount = 0
             if player is ChromecastPlayer {
                 lastKnownPosition = chromecastSeekOffset + position
             } else {
                 lastKnownPosition = position
+            }
+        } else {
+            // Track failures and kill zombie after too many
+            pollFailCount += 1
+            if pollFailCount > 10 {
+                print("DEBUG: Killing zombie player after \(pollFailCount) poll failures")
+                cleanupPlayer()
+                positionTimer?.invalidate()
+                positionTimer = nil
+                pollFailCount = 0
             }
         }
 
@@ -392,16 +471,38 @@ class CastingViewModel: ObservableObject {
             return
         }
 
-        // Embedded path (local AVPlayer)
-        if useEmbeddedPlayer && newOutput == .mpv {
+        // Switching to embedded from Chromecast
+        if useEmbeddedPlayer && newOutput == .mpv && outputType == .chromecast {
+            print("DEBUG: Switching from Chromecast to embedded")
+            // Capture position before cleanup
+            let position = currentTime
+            print("DEBUG: Captured position: \(position)")
+
+            // Stop Chromecast player
+            print("DEBUG: Calling cleanupPlayer()")
+            cleanupPlayer()
+            print("DEBUG: cleanupPlayer() done")
+
+            // Switch to embedded
             outputType = newOutput
+
+            // Seek embedded player to captured position
+            print("DEBUG: Seeking embedded to \(position)")
+            seek(to: position)
+
             statusMessage = "Playing embedded"
+            print("DEBUG: Switch complete")
+            return
+        }
+
+        // Already on embedded, no change needed
+        if useEmbeddedPlayer && newOutput == .mpv {
             return
         }
 
         // Switching to Chromecast from embedded playback
         if useEmbeddedPlayer && outputType == .mpv && newOutput == .chromecast {
-            let position = embeddedCurrentTime
+            let position = currentTime  // Use full time (embeddedSeekOffset + embeddedCurrentTime)
             if transcodeServer == nil {
                 startTranscoder()
             }
@@ -512,9 +613,21 @@ class CastingViewModel: ObservableObject {
     }
 
     private func launchChromecast(device: ChromecastDevice, server: TranscodeServer, seekTo position: TimeInterval, paused: Bool) async throws -> PlayerHandle {
-        let client = CastV2Client(device: device, verbose: false)
-        try client.connect()
-        try client.launchDefaultMediaReceiver()
+        print("DEBUG: launchChromecast - device=\(device.name), streamURL=\(server.url)")
+
+        // Reuse existing promo client if available, otherwise create new one
+        let client: CastV2Client
+        if let existingClient = promoCastClient {
+            print("DEBUG: launchChromecast - reusing existing promo client")
+            client = existingClient
+            promoCastClient = nil  // Transfer ownership
+        } else {
+            print("DEBUG: launchChromecast - creating new client")
+            client = CastV2Client(device: device, verbose: true)
+            try client.connect()
+            try client.launchDefaultMediaReceiver()
+        }
+        print("DEBUG: launchChromecast - client ready")
 
         // For LIVE streams, seek server BEFORE loading
         if position > 0 {
@@ -525,7 +638,9 @@ class CastingViewModel: ObservableObject {
         }
 
         let title = currentFile?.lastPathComponent ?? "Beamy Stream"
+        print("DEBUG: launchChromecast - loading media: \(server.url)")
         try client.loadMedia(url: server.url, contentType: "application/vnd.apple.mpegurl", title: title, isLive: true)
+        print("DEBUG: launchChromecast - media loaded!")
 
         let player = ChromecastPlayer(client: client)
 
@@ -692,6 +807,62 @@ class CastingViewModel: ObservableObject {
         statusMessage = "Playing"
     }
 
+    // MARK: Promo Display
+
+    private func showPromoOnChromecast() {
+        guard let device = selectedDevice else { return }
+
+        Task {
+            do {
+                // Start promo image server if not already running
+                if promoImageServer == nil {
+                    // Use absolute path to the backdrop image in source tree
+                    let backdropPath = "/Users/rob/Dev/Beamy/assets/backdrop_1920x1080.jpg"
+                    print("[PROMO] Starting image server with path: \(backdropPath)")
+                    promoImageServer = try PromoImageServer(imagePath: backdropPath, port: 8081)
+                }
+
+                guard let promoServer = promoImageServer else {
+                    print("[PROMO] ERROR: promoServer is nil after init")
+                    return
+                }
+
+                print("[PROMO] Image server URL: \(promoServer.url)")
+
+                // Create and store the client (don't let it disconnect!)
+                let client = CastV2Client(device: device, verbose: true)
+                try client.connect()
+                print("[PROMO] Connected to Chromecast")
+
+                try client.launchDefaultMediaReceiver()
+                print("[PROMO] Launched receiver")
+
+                print("[PROMO] Loading media: \(promoServer.url.absoluteString)")
+                try client.loadMedia(
+                    url: promoServer.url,
+                    contentType: "image/jpeg",
+                    title: "Beamy McBeamface",
+                    isLive: false
+                )
+                print("[PROMO] Media loaded successfully")
+
+                // Store the client to keep it alive (don't disconnect!)
+                await MainActor.run {
+                    promoCastClient = client
+                }
+
+                await MainActor.run {
+                    statusMessage = "Ready - Drop a video file to start"
+                }
+            } catch {
+                print("[PROMO] ERROR: \(error)")
+                await MainActor.run {
+                    errorMessage = "Failed to show promo: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     // MARK: Cleanup
 
     private func cleanupPlayer() {
@@ -700,6 +871,9 @@ class CastingViewModel: ObservableObject {
     }
 
     func stopPlayback() {
+        print("DEBUG: stopPlayback() called")
+        print("DEBUG: playerHandle exists: \(playerHandle != nil)")
+        print("DEBUG: promoCastClient exists before cleanup: \(promoCastClient != nil)")
         cleanupPlayer()
         mpvPlayerCoordinator?.stop()
         mpvPlayerCoordinator = nil
@@ -707,6 +881,42 @@ class CastingViewModel: ObservableObject {
         positionTimer = nil
         transcodeServer?.stop()
         transcodeServer = nil
+        promoImageServer?.stop()
+        promoImageServer = nil
+        // Don't disconnect promo client here - let new video client take over the session
+        // Disconnecting would stop the receiver since it's the only sender
+        print("DEBUG: setting promoCastClient = nil (NOT calling disconnect)")
+        promoCastClient = nil
+        isStreamReady = false
+        lastKnownPosition = 0
+        lastKnownPaused = true
+        chromecastSeekOffset = 0
+        embeddedIsPlaying = false
+        embeddedCurrentTime = 0
+        embeddedDuration = 0
+        embeddedSeekOffset = 0
+        currentFile = nil
+        mediaInfo = nil
+        duration = 0
+        statusMessage = "Drop a video file to start"
+    }
+
+    /// Called when app terminates - stops the receiver to clear Chromecast screen
+    func terminatePlayback() {
+        // Stop receiver to clear Chromecast screen on quit
+        try? promoCastClient?.stopMedia()
+        promoCastClient?.disconnect()
+        promoCastClient = nil
+
+        cleanupPlayer()
+        mpvPlayerCoordinator?.stop()
+        mpvPlayerCoordinator = nil
+        positionTimer?.invalidate()
+        positionTimer = nil
+        transcodeServer?.stop()
+        transcodeServer = nil
+        promoImageServer?.stop()
+        promoImageServer = nil
         isStreamReady = false
         lastKnownPosition = 0
         lastKnownPaused = true

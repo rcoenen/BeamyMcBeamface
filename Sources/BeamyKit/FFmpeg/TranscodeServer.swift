@@ -244,8 +244,8 @@ public final class TranscodeServer: @unchecked Sendable {
                 "-level", "3.1",
                 "-preset", config.preset,
                 "-crf", "\(config.crf)",
-                "-g", "30",
-                "-keyint_min", "30",
+                "-g", "60",  // GOP of 60 frames (2 sec at 30fps, matches hls_time)
+                "-keyint_min", "60",
                 "-sc_threshold", "0",
             ]
 
@@ -263,20 +263,12 @@ public final class TranscodeServer: @unchecked Sendable {
                 "-hls_time", "2",
             ]
 
-            if embeddedMode {
-                // Embedded mode: keep all segments, VOD-style playlist for proper seeking
-                args += [
-                    "-hls_list_size", "0",  // Keep all segments in playlist
-                    "-hls_playlist_type", "event",  // EVENT type allows appending but keeps history
-                    "-hls_flags", "append_list+program_date_time",
-                ]
-            } else {
-                // Live/Chromecast mode: sliding window, delete old segments
-                args += [
-                    "-hls_list_size", "6",
-                    "-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
-                ]
-            }
+            // VOD-style playlist for both embedded and Chromecast - more stable playback
+            args += [
+                "-hls_list_size", "0",  // Keep all segments in playlist
+                "-hls_playlist_type", "event",  // EVENT type allows appending but keeps history
+                "-hls_flags", "append_list+program_date_time",
+            ]
 
             args += [
                 "-hls_segment_filename", segmentPath,
