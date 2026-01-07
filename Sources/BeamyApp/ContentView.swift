@@ -121,6 +121,9 @@ struct PlaybackControlsView: View {
                 }
                 .buttonStyle(.borderless)
 
+                Spacer()
+                    .frame(width: 32)
+
                 // Play/Pause
                 Button(action: { viewModel.togglePlayPause() }) {
                     Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
@@ -129,13 +132,6 @@ struct PlaybackControlsView: View {
                 .buttonStyle(.borderless)
                 .frame(width: 44)
 
-                // Skip forward 10s
-                Button(action: { viewModel.skipForward() }) {
-                    Image(systemName: "goforward.10")
-                        .font(.title2)
-                }
-                .buttonStyle(.borderless)
-
                 // Stop button
                 Button(action: { viewModel.stopAndReset() }) {
                     Image(systemName: "stop.fill")
@@ -143,6 +139,16 @@ struct PlaybackControlsView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Stop playback")
+
+                Spacer()
+                    .frame(width: 32)
+
+                // Skip forward 10s
+                Button(action: { viewModel.skipForward() }) {
+                    Image(systemName: "goforward.10")
+                        .font(.title2)
+                }
+                .buttonStyle(.borderless)
 
                 Spacer()
 
@@ -177,71 +183,71 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
-            HStack(spacing: 12) {
-                // Output selector (segmented control)
-                Text("Output:")
-                    .foregroundColor(.secondary)
+            HStack(spacing: 0) {
+                // Left: Beamy logo
+                Image("BeamyLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: 90)
+                    .fixedSize()
 
-                Picker("", selection: Binding(
-                    get: { viewModel.outputType },
-                    set: { newValue in
-                        viewModel.switchOutput(to: newValue)
-                    }
-                )) {
-                    Text("Beamy").tag(OutputType.mpv)
-                    Text("Chromecast").tag(OutputType.chromecast)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 180)
-                .disabled(viewModel.isSwitchingOutput)
+                Spacer()
 
-                // Chromecast device button (only shown when Chromecast selected)
-                if viewModel.outputType == .chromecast {
-                    Button(action: { showDeviceSelector = true }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "tv")
-                            Text(viewModel.selectedDevice?.name ?? "Select device...")
-                                .lineLimit(1)
-                                .truncationMode(.tail)
+                // Center: Output controls (stacked vertically)
+                VStack(spacing: 8) {
+                    Text("Output")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+
+                    // Beamy/Chromecast picker
+                    Picker("", selection: Binding(
+                        get: { viewModel.outputType },
+                        set: { newValue in
+                            viewModel.switchOutput(to: newValue)
                         }
-                        .frame(maxWidth: 180)
+                    )) {
+                        Text("Beamy").tag(OutputType.mpv)
+                        Text("Chromecast").tag(OutputType.chromecast)
                     }
-                    .buttonStyle(.bordered)
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 200)
+                    .disabled(viewModel.isSwitchingOutput)
 
-                    if viewModel.isDiscovering {
-                        ProgressView()
-                            .scaleEffect(0.7)
+                    // Chromecast device selector (or switching indicator)
+                    if viewModel.isSwitchingOutput {
+                        HStack(spacing: 4) {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                            Text("Switching...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    } else if viewModel.outputType == .chromecast {
+                        Button(action: { showDeviceSelector = true }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "tv")
+                                Text(viewModel.selectedDevice?.name ?? "Select device...")
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .frame(width: 200)
                     }
                 }
 
                 Spacer()
 
-                // Switching indicator
-                if viewModel.isSwitchingOutput {
-                    HStack(spacing: 4) {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                        Text("Switching...")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                // Beamy logo
-                Image("BeamyLogo")
+                // Right: Beamy icon
+                Image("BeamyIcon")
                     .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(height: 56)
-
-                Button(action: { showSettings = true }) {
-                    Image(systemName: "gearshape")
-                }
-                .buttonStyle(.borderless)
+                    .scaledToFit()
+                    .frame(height: 140)
+                    .fixedSize()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .frame(height: 80)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
             .background(Color(nsColor: .controlBackgroundColor))
             .sheet(isPresented: $showSettings) {
                 SettingsView()
@@ -347,7 +353,7 @@ struct ContentView: View {
                                     isTargeted ? Color.blue : Color.gray.opacity(0.3),
                                     style: StrokeStyle(lineWidth: 3, dash: [10])
                                 )
-                                .padding(20)
+                                .padding(8)
                         )
 
                     VStack(spacing: 16) {
