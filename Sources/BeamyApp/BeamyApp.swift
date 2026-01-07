@@ -143,7 +143,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let windowSize = NSSize(width: 450, height: 520)
+        let windowSize = NSSize(width: 520, height: 500)
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: windowSize),
             styleMask: [.titled, .closable],
@@ -313,36 +313,30 @@ private struct AboutView: View {
                 .foregroundColor(.secondary)
 
             Divider()
-                .frame(width: 300)
+                .frame(width: 460)
                 .padding(.vertical, 4)
 
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 8) {
-                    Text("🇪🇺")
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("To beam")
-                            .font(.headline) +
-                        Text(" (proper Euro-English)")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                        Text("verb — to \"beam\" (project) something using a \"beamer\" (projector).")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Text("In the age of streaming: beaming is streaming.")
-                            .font(.caption)
-                            .italic()
-                            .foregroundColor(.secondary)
-                    }
-                }
+                Text("To beam")
+                    .font(.headline) +
+                Text(" (proper Euro-English) 🇪🇺")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                Text("verb — to \"beam\" (project) something using a \"beamer\" (projector).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("In the age of streaming: beaming is streaming.")
+                    .font(.caption)
+                    .italic()
+                    .foregroundColor(.secondary)
 
-                Text("Beamy McBeamface beams whatever to wherever")
+                Text("Beamy McBeamface beams whatever to wherever!")
                     .font(.callout)
                     .padding(.top, 4)
-                Text("(yeah sorry, just Chromecast for now — Apple TV will be added)")
+                Text("(Well, just video to Chromecast for now that is. AppleTV will be added later! Maybe. lol)")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            .frame(maxWidth: 340, alignment: .leading)
 
             Spacer()
 
