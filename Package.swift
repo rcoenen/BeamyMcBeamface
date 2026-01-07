@@ -31,9 +31,5 @@ let package = Package(
                 .product(name: "TOMLKit", package: "TOMLKit"),
             ]
         ),
-        .testTarget(
-            name: "BeamyKitTests",
-            dependencies: ["BeamyKit"]
-        ),
     ]
 )
