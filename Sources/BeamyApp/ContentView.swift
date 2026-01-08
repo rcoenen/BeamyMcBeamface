@@ -180,6 +180,31 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showDeviceSelector = false
 
+    private var outputIcon: String {
+        switch viewModel.outputType {
+        case .mpv: return "desktopcomputer"
+        case .chromecast: return "tv"
+        case .airplay: return "airplayvideo"
+        }
+    }
+
+    private var outputDescription: String {
+        switch viewModel.outputType {
+        case .mpv:
+            return "Playing locally via mpv"
+        case .chromecast:
+            if let device = viewModel.selectedDevice {
+                return "Casting to \(device.name)"
+            }
+            return "Chromecast - no device selected"
+        case .airplay:
+            if let device = viewModel.selectedAirPlayDevice {
+                return "AirPlay to \(device.name)"
+            }
+            return "AirPlay - no device selected"
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
@@ -199,7 +224,7 @@ struct ContentView: View {
                         .font(.headline)
                         .foregroundColor(.secondary)
 
-                    // Beamy/Chromecast picker
+                    // Beamy/Chromecast/AirPlay picker
                     Picker("", selection: Binding(
                         get: { viewModel.outputType },
                         set: { newValue in
@@ -208,13 +233,14 @@ struct ContentView: View {
                     )) {
                         Text("Beamy").tag(OutputType.mpv)
                         Text("Chromecast").tag(OutputType.chromecast)
+                        Text("AirPlay").tag(OutputType.airplay)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(width: 200)
+                    .frame(width: 280)
                     .disabled(viewModel.isSwitchingOutput)
 
-                    // Chromecast device selector (or switching indicator)
+                    // Device selector (or switching indicator)
                     if viewModel.isSwitchingOutput {
                         HStack(spacing: 4) {
                             ProgressView()
@@ -227,9 +253,28 @@ struct ContentView: View {
                         Button(action: { showDeviceSelector = true }) {
                             HStack(spacing: 4) {
                                 Image(systemName: "tv")
-                                Text(viewModel.selectedDevice?.name ?? "Select device...")
+                                Text(viewModel.selectedDevice?.name ?? "Select Chromecast...")
                                     .lineLimit(1)
                                     .truncationMode(.tail)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .frame(width: 200)
+                    } else if viewModel.outputType == .airplay {
+                        Button(action: { showDeviceSelector = true }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "airplayvideo")
+                                if let device = viewModel.selectedAirPlayDevice {
+                                    if device.requiresPairing {
+                                        Image(systemName: "lock.fill")
+                                            .font(.caption)
+                                    }
+                                    Text(device.name)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                } else {
+                                    Text("Select AirPlay...")
+                                }
                             }
                         }
                         .buttonStyle(.bordered)
@@ -254,7 +299,7 @@ struct ContentView: View {
                     .environmentObject(viewModel)
             }
             .sheet(isPresented: $showDeviceSelector) {
-                ChromecastSelectorView()
+                DeviceSelectorView()
                     .environmentObject(viewModel)
             }
 
@@ -314,14 +359,8 @@ struct ContentView: View {
 
                                 // Output indicator
                                 HStack(spacing: 8) {
-                                    Image(systemName: viewModel.outputType == .mpv ? "desktopcomputer" : "tv")
-                                    if viewModel.outputType == .mpv {
-                                        Text("Playing locally via mpv")
-                                    } else if let device = viewModel.selectedDevice {
-                                        Text("Casting to \(device.name)")
-                                    } else {
-                                        Text("Chromecast - no device selected")
-                                    }
+                                    Image(systemName: outputIcon)
+                                    Text(outputDescription)
                                 }
                                 .font(.headline)
                                 .foregroundColor(.secondary)

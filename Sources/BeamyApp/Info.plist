@@ -33,10 +33,11 @@
     <key>LSUIElement</key>
     <false/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Beamy McBeamface needs network access to discover and cast to Chromecast devices.</string>
+    <string>Beamy McBeamface needs network access to discover and cast to Chromecast and AirPlay devices.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_googlecast._tcp</string>
+        <string>_airplay._tcp</string>
     </array>
 </dict>
 </plist>

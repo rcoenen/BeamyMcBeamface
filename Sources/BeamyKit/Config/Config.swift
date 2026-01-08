@@ -5,19 +5,22 @@ public struct Config: Codable {
     public var ffmpeg: FFmpegConfig
     public var server: ServerConfig
     public var chromecast: ChromecastConfig
+    public var airplay: AirPlayConfig
     public var ui: UIConfig
 
     enum CodingKeys: String, CodingKey {
         case ffmpeg
         case server
         case chromecast
+        case airplay
         case ui
     }
 
-    public init(ffmpeg: FFmpegConfig, server: ServerConfig, chromecast: ChromecastConfig, ui: UIConfig) {
+    public init(ffmpeg: FFmpegConfig, server: ServerConfig, chromecast: ChromecastConfig, airplay: AirPlayConfig, ui: UIConfig) {
         self.ffmpeg = ffmpeg
         self.server = server
         self.chromecast = chromecast
+        self.airplay = airplay
         self.ui = ui
     }
 
@@ -26,6 +29,7 @@ public struct Config: Codable {
         ffmpeg = try container.decodeIfPresent(FFmpegConfig.self, forKey: .ffmpeg) ?? .default
         server = try container.decodeIfPresent(ServerConfig.self, forKey: .server) ?? .default
         chromecast = try container.decodeIfPresent(ChromecastConfig.self, forKey: .chromecast) ?? .default
+        airplay = try container.decodeIfPresent(AirPlayConfig.self, forKey: .airplay) ?? .default
         ui = try container.decodeIfPresent(UIConfig.self, forKey: .ui) ?? .default
     }
 
@@ -34,6 +38,7 @@ public struct Config: Codable {
         try container.encode(ffmpeg, forKey: .ffmpeg)
         try container.encode(server, forKey: .server)
         try container.encode(chromecast, forKey: .chromecast)
+        try container.encode(airplay, forKey: .airplay)
         try container.encode(ui, forKey: .ui)
     }
 
@@ -79,8 +84,20 @@ public struct Config: Codable {
         }
     }
 
+    public struct AirPlayConfig: Codable {
+        public var discoveryTimeout: Double
+        public var defaultDevice: String?
+
+        public static var `default`: AirPlayConfig {
+            AirPlayConfig(
+                discoveryTimeout: 5.0,
+                defaultDevice: nil
+            )
+        }
+    }
+
     public struct UIConfig: Codable {
-        /// "mpv" or "chromecast"
+        /// "mpv", "chromecast", or "airplay"
         public var defaultOutput: String?
 
         public static var `default`: UIConfig {
@@ -93,6 +110,7 @@ public struct Config: Codable {
             ffmpeg: .default,
             server: .default,
             chromecast: .default,
+            airplay: .default,
             ui: .default
         )
     }

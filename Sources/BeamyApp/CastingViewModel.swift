@@ -7,6 +7,7 @@ import Combine
 enum OutputType: String, CaseIterable {
     case mpv = "mpv"
     case chromecast = "chromecast"
+    case airplay = "airplay"
 }
 
 // MARK: - Player Handle
@@ -24,6 +25,7 @@ class CastingViewModel: ObservableObject {
     // MARK: Published State
 
     @Published var devices: [ChromecastDevice] = []
+    @Published var airPlayDevices: [AirPlayDevice] = []
     @Published var selectedDevice: ChromecastDevice? {
         didSet {
             saveSelectedDevice()
@@ -31,6 +33,11 @@ class CastingViewModel: ObservableObject {
             if selectedDevice != nil && outputType == .chromecast && currentFile == nil {
                 showPromoOnChromecast()
             }
+        }
+    }
+    @Published var selectedAirPlayDevice: AirPlayDevice? {
+        didSet {
+            saveSelectedAirPlayDevice()
         }
     }
     @Published var currentFile: URL?
@@ -175,6 +182,7 @@ class CastingViewModel: ObservableObject {
             switch savedOutput {
             case "mpv": outputType = .mpv
             case "chromecast": outputType = .chromecast
+            case "airplay": outputType = .airplay
             default: break
             }
         }
@@ -186,6 +194,13 @@ class CastingViewModel: ObservableObject {
         guard !isLoadingConfig else { return }
         guard var config = try? Config.load() else { return }
         config.chromecast.defaultDevice = selectedDevice?.name
+        try? config.save()
+    }
+
+    private func saveSelectedAirPlayDevice() {
+        guard !isLoadingConfig else { return }
+        guard var config = try? Config.load() else { return }
+        config.airplay.defaultDevice = selectedAirPlayDevice?.name
         try? config.save()
     }
 
@@ -205,30 +220,48 @@ class CastingViewModel: ObservableObject {
 
         Task {
             do {
-                let timeout = (try? Config.load().chromecast.discoveryTimeout) ?? 5.0
-                let allDevices = try ChromecastDiscovery.discover(timeout: timeout)
-                let videoDevices = allDevices.filter { $0.isVideoCapable }
+                let config = try? Config.load()
+                let chromecastTimeout = config?.chromecast.discoveryTimeout ?? 5.0
+                let airplayTimeout = config?.airplay.discoveryTimeout ?? 10.0  // Longer timeout for AirPlay
+
+                // Discover AirPlay devices FIRST (video-capable only)
+                let videoAirPlayDevices = AirPlayDiscovery.discover(timeout: airplayTimeout, videoOnly: true)
+
+                // Then discover Chromecast devices
+                let allChromecastDevices = try ChromecastDiscovery.discover(timeout: chromecastTimeout)
+                let videoChromecastDevices = allChromecastDevices.filter { $0.isVideoCapable }
 
                 await MainActor.run {
-                    self.devices = videoDevices
+                    self.devices = videoChromecastDevices
+                    self.airPlayDevices = videoAirPlayDevices
                     self.isDiscovering = false
 
-                    // Debug: Show discovered devices
-                    self.debugLog("[DISCOVERY] Found \(videoDevices.count) video-capable device(s):")
-                    for device in videoDevices {
+                    // Debug: Show discovered Chromecast devices
+                    self.debugLog("[DISCOVERY] Found \(videoChromecastDevices.count) Chromecast device(s):")
+                    for device in videoChromecastDevices {
                         self.debugLog("[DISCOVERY]   - \(device.name): \(device.address) (port \(device.port))")
                     }
 
-                    // Restore saved device
-                    if let defaultName = try? Config.load().chromecast.defaultDevice {
-                        self.debugLog("[DISCOVERY] Saved device name: \(defaultName)")
+                    // Debug: Show discovered AirPlay devices
+                    self.debugLog("[DISCOVERY] Found \(videoAirPlayDevices.count) AirPlay device(s):")
+                    for device in videoAirPlayDevices {
+                        let pairing = device.requiresPairing ? " [Pairing Required]" : ""
+                        self.debugLog("[DISCOVERY]   - \(device.name): \(device.address)\(pairing)")
+                    }
+
+                    // Restore saved Chromecast device
+                    if let defaultName = config?.chromecast.defaultDevice {
+                        self.debugLog("[DISCOVERY] Saved Chromecast: \(defaultName)")
                         self.isLoadingConfig = true
-                        self.selectedDevice = videoDevices.first { $0.name == defaultName }
-                        if let selected = self.selectedDevice {
-                            self.debugLog("[DISCOVERY] Selected device: \(selected.name) @ \(selected.address)")
-                        } else {
-                            self.debugLog("[DISCOVERY] WARNING: Saved device '\(defaultName)' not found in discovered devices")
-                        }
+                        self.selectedDevice = videoChromecastDevices.first { $0.name == defaultName }
+                        self.isLoadingConfig = false
+                    }
+
+                    // Restore saved AirPlay device
+                    if let defaultName = config?.airplay.defaultDevice {
+                        self.debugLog("[DISCOVERY] Saved AirPlay: \(defaultName)")
+                        self.isLoadingConfig = true
+                        self.selectedAirPlayDevice = videoAirPlayDevices.first { $0.name == defaultName }
                         self.isLoadingConfig = false
                     }
                 }
@@ -622,6 +655,10 @@ class CastingViewModel: ObservableObject {
             }
             let handle = try await launchChromecast(device: device, server: server, seekTo: position, paused: paused)
             playerHandle = handle
+
+        case .airplay:
+            // TODO: Implement AirPlay playback (requires pairing first)
+            throw PlayerError.unsupportedOperation
         }
 
         lastKnownPosition = position
