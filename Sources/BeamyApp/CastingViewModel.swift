@@ -530,10 +530,17 @@ class CastingViewModel: ObservableObject {
     // MARK: Output Switching
 
     func switchOutput(to newOutput: OutputType) {
+        print("DEBUG switchOutput: called with \(newOutput), current=\(outputType), isSwitchingOutput=\(isSwitchingOutput)")
+
         guard !isSwitchingOutput else {
+            print("DEBUG switchOutput: BLOCKED - isSwitchingOutput is true")
             statusMessage = "Output switch in progress..."
             return
         }
+
+        // Clear any previous error when switching
+        errorMessage = nil
+        print("DEBUG switchOutput: proceeding with switch")
 
         // Switching to embedded from Chromecast
         if useEmbeddedPlayer && newOutput == .mpv && outputType == .chromecast {
@@ -563,7 +570,16 @@ class CastingViewModel: ObservableObject {
         }
 
         // Already on embedded, no change needed
-        if useEmbeddedPlayer && newOutput == .mpv {
+        if useEmbeddedPlayer && newOutput == .mpv && outputType == .mpv {
+            print("DEBUG switchOutput: already on embedded mpv, no change")
+            return
+        }
+
+        // Switching to embedded from AirPlay (or other non-chromecast)
+        if useEmbeddedPlayer && newOutput == .mpv && outputType != .chromecast {
+            print("DEBUG switchOutput: switching to embedded from \(outputType)")
+            outputType = newOutput
+            statusMessage = "Playing embedded"
             return
         }
 
@@ -608,6 +624,19 @@ class CastingViewModel: ObservableObject {
         if newOutput == .chromecast && selectedDevice == nil {
             outputType = newOutput
             statusMessage = "Select a Chromecast device"
+            return
+        }
+
+        // AirPlay not yet implemented - just switch output type
+        if newOutput == .airplay {
+            outputType = newOutput
+            if selectedAirPlayDevice == nil {
+                statusMessage = "Select an AirPlay device"
+            } else if selectedAirPlayDevice?.requiresPairing == true {
+                statusMessage = "Pairing required"
+            } else {
+                statusMessage = "AirPlay playback not yet implemented"
+            }
             return
         }
 
