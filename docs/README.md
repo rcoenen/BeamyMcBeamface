@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="../assets/readme/icon.png" alt="Beamy Icon" height="100">
+  <br>
+  <img src="../assets/readme/logo.png" alt="Beamy" height="60">
+</p>
+
 # Beamy
 
 Beamy streams video by running a local transcoder and serving it over HTTP. Playback devices simply consume the live stream.
