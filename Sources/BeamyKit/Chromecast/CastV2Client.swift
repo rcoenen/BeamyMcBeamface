@@ -60,6 +60,11 @@ public final class CastV2Client: @unchecked Sendable {
     }
 
     public func connect() throws {
+        guard !device.address.isEmpty else {
+            log("Connection failed: device address is empty")
+            throw CastV2Error.invalidAddress
+        }
+
         log("Connecting to \(device.address):8009 via TLS...")
 
         let host = NWEndpoint.Host(device.address)
@@ -568,17 +573,20 @@ public enum CastV2Error: Error, CustomStringConvertible {
     case connectionTimeout
     case connectionFailed(String)
     case notConnected
+    case invalidAddress
     case encodingFailed
     case sendFailed(String)
 
     public var description: String {
         switch self {
         case .connectionTimeout:
-            return "Connection timed out"
+            return "Could not connect to Chromecast. Check if it's powered on."
         case .connectionFailed(let msg):
-            return "Connection failed: \(msg)"
+            return "Chromecast connection failed: \(msg)"
         case .notConnected:
-            return "Not connected to Chromecast"
+            return "Not connected to Chromecast. Please try again."
+        case .invalidAddress:
+            return "Device address not resolved. Please re-select the device."
         case .encodingFailed:
             return "Failed to encode message"
         case .sendFailed(let msg):

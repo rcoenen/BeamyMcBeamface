@@ -122,6 +122,11 @@ public struct ChromecastDevice: Sendable, Hashable, Equatable {
         castType == .audio
     }
 
+    /// Returns true if the device has a valid (non-empty) IP address
+    public var hasValidAddress: Bool {
+        !address.isEmpty
+    }
+
     /// Human-readable capability description
     public var capabilityDescription: String {
         switch castType {

@@ -82,6 +82,7 @@ class CastingViewModel: ObservableObject {
     private var isLoadingConfig = false
     private var imageServer: ImageServer?
     private var promoCastClient: CastV2Client?  // Keep promo client alive
+    private let debugLogURL = URL(fileURLWithPath: "/tmp/beamy-debug.log")
 
     // Position tracking
     private var lastKnownPosition: TimeInterval = 0
@@ -142,10 +143,28 @@ class CastingViewModel: ObservableObject {
     // MARK: Initialization
 
     init() {
+        // Create/clear debug log
+        if !FileManager.default.fileExists(atPath: debugLogURL.path) {
+            FileManager.default.createFile(atPath: debugLogURL.path, contents: nil)
+        }
+        debugLog("=== App Started ===")
+
         isLoadingConfig = true
         loadConfig()
         discoverDevices()
         isLoadingConfig = false
+    }
+
+    private func debugLog(_ message: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+
+        if let handle = try? FileHandle(forWritingTo: debugLogURL) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        }
     }
 
     private func loadConfig() {
@@ -194,10 +213,22 @@ class CastingViewModel: ObservableObject {
                     self.devices = videoDevices
                     self.isDiscovering = false
 
+                    // Debug: Show discovered devices
+                    self.debugLog("[DISCOVERY] Found \(videoDevices.count) video-capable device(s):")
+                    for device in videoDevices {
+                        self.debugLog("[DISCOVERY]   - \(device.name): \(device.address) (port \(device.port))")
+                    }
+
                     // Restore saved device
                     if let defaultName = try? Config.load().chromecast.defaultDevice {
+                        self.debugLog("[DISCOVERY] Saved device name: \(defaultName)")
                         self.isLoadingConfig = true
                         self.selectedDevice = videoDevices.first { $0.name == defaultName }
+                        if let selected = self.selectedDevice {
+                            self.debugLog("[DISCOVERY] Selected device: \(selected.name) @ \(selected.address)")
+                        } else {
+                            self.debugLog("[DISCOVERY] WARNING: Saved device '\(defaultName)' not found in discovered devices")
+                        }
                         self.isLoadingConfig = false
                     }
                 }
@@ -618,6 +649,11 @@ class CastingViewModel: ObservableObject {
     private func launchChromecast(device: ChromecastDevice, server: TranscodeServer, seekTo position: TimeInterval, paused: Bool) async throws -> PlayerHandle {
         print("DEBUG: launchChromecast - device=\(device.name), streamURL=\(server.url)")
 
+        // Validate device has valid address
+        guard device.hasValidAddress else {
+            throw CastV2Error.invalidAddress
+        }
+
         // Reuse existing promo client if available, otherwise create new one
         let client: CastV2Client
         if let existingClient = promoCastClient {
@@ -813,7 +849,22 @@ class CastingViewModel: ObservableObject {
     // MARK: Promo Display
 
     private func showPromoOnChromecast() {
-        guard let device = selectedDevice else { return }
+        guard let device = selectedDevice else {
+            debugLog("[PROMO] No device selected, skipping promo")
+            return
+        }
+
+        debugLog("[PROMO] showPromoOnChromecast() called for device: \(device.name)")
+
+        // Check if device has valid address, trigger re-discovery if not
+        guard device.hasValidAddress else {
+            debugLog("[PROMO] Device has EMPTY address, triggering re-discovery")
+            statusMessage = "Re-discovering device..."
+            discoverDevices()
+            return
+        }
+
+        debugLog("[PROMO] Device has address: \(device.address), attempting connection...")
 
         Task {
             do {

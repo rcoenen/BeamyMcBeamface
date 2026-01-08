@@ -40,8 +40,8 @@
 - **Validation:** Manual test - verify error displays correctly
 
 ## Verification Checklist
-- [ ] Empty address triggers `invalidAddress` error
-- [ ] Error message is user-friendly
-- [ ] Re-discovery is triggered automatically when address is empty
-- [ ] After re-discovery, casting works if device is found
-- [ ] No regression for working devices
+- [x] Empty address triggers `invalidAddress` error
+- [x] Error message is user-friendly
+- [x] Re-discovery is triggered automatically when address is empty
+- [x] After re-discovery, casting works if device is found
+- [x] No regression for working devices
