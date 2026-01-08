@@ -1,0 +1,25 @@
+.DS_Store
+/.build
+/Packages
+xcuserdata/
+DerivedData/
+.swiftpm/
+.netrc
+beamy.toml
+assets/test_with_timecode.mkv
+
+# XcodeGen output (regenerated from project.yml)
+*.xcodeproj
+build/
+
+# AI assistant directories
+.claude/
+.gemini/
+.opencode/
+
+# OpenSpec (tracked for rollback)
+# openspec/
+
+# Test files
+Sources/TestChromecast/
+test-chromecast.swift
