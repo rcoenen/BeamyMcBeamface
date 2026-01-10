@@ -14,6 +14,7 @@ VERSION=$(grep MARKETING_VERSION project.yml | head -1 | sed 's/.*"\(.*\)"/\1/')
 DMG_NAME="BeamyMcBeamface-v${VERSION}.dmg"
 VOLUME_NAME="${APP_NAME}"
 BACKDROP="assets/dmg-backdrop-600x400.png"
+VOLICON="assets/dmg-disk-icon.icns"
 
 echo -e "${YELLOW}Creating DMG for ${APP_NAME} v${VERSION}...${NC}"
 
@@ -43,6 +44,7 @@ rm -f "$DMG_NAME"
 echo -e "${YELLOW}Running create-dmg...${NC}"
 create-dmg \
     --volname "$VOLUME_NAME" \
+    --volicon "$VOLICON" \
     --background "$BACKDROP" \
     --window-pos 200 120 \
     --window-size 600 400 \
@@ -55,6 +57,12 @@ create-dmg \
     --format UDBZ \
     "$DMG_NAME" \
     "$APP_PATH"
+
+# Set custom icon on DMG file itself
+if command -v fileicon &> /dev/null; then
+    echo -e "${YELLOW}Setting custom icon on DMG file...${NC}"
+    fileicon set "$DMG_NAME" "$VOLICON"
+fi
 
 echo -e "${GREEN}DMG created: ${DMG_NAME}${NC}"
 ls -lh "$DMG_NAME"
