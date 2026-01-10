@@ -7,6 +7,7 @@ import Combine
 enum OutputType: String, CaseIterable {
     case mpv = "mpv"
     case chromecast = "chromecast"
+    case roku = "roku"
 }
 
 // MARK: - Player Handle
@@ -24,12 +25,21 @@ class CastingViewModel: ObservableObject {
     // MARK: Published State
 
     @Published var devices: [ChromecastDevice] = []
+    @Published var rokuDevices: [RokuDevice] = []
     @Published var selectedDevice: ChromecastDevice? {
         didSet {
             saveSelectedDevice()
             // Show promo on Chromecast when device selected but no video loaded
             if selectedDevice != nil && outputType == .chromecast && currentFile == nil {
                 showPromoOnChromecast()
+            }
+        }
+    }
+    @Published var selectedRokuDevice: RokuDevice? {
+        didSet {
+            // Show promo on Roku when device selected but no video loaded
+            if selectedRokuDevice != nil && outputType == .roku && currentFile == nil {
+                showPromoOnRoku()
             }
         }
     }
@@ -45,6 +55,11 @@ class CastingViewModel: ObservableObject {
             // Show promo when switching TO Chromecast (if device selected but no video)
             if outputType == .chromecast && selectedDevice != nil && currentFile == nil {
                 showPromoOnChromecast()
+            }
+
+            // Show promo when switching TO Roku (if device selected but no video)
+            if outputType == .roku && selectedRokuDevice != nil && currentFile == nil {
+                showPromoOnRoku()
             }
 
             // Disconnect from Chromecast when switching TO Beamy
@@ -81,7 +96,9 @@ class CastingViewModel: ObservableObject {
     private var positionTimer: Timer?
     private var isLoadingConfig = false
     private var imageServer: ImageServer?
+    private var imageStreamServer: ImageStreamServer?  // For Roku promo (image as video)
     private var promoCastClient: CastV2Client?  // Keep promo client alive
+    private var rokuPlayer: RokuPlayer?
     private let debugLogURL = URL(fileURLWithPath: "/tmp/beamy-debug.log")
 
     // Position tracking
@@ -204,38 +221,37 @@ class CastingViewModel: ObservableObject {
         errorMessage = nil
 
         Task {
-            do {
-                let timeout = (try? Config.load().chromecast.discoveryTimeout) ?? 5.0
-                let allDevices = try ChromecastDiscovery.discover(timeout: timeout)
-                let videoDevices = allDevices.filter { $0.isVideoCapable }
+            // Discover Chromecast and Roku
+            let timeout = (try? Config.load().chromecast.discoveryTimeout) ?? 5.0
+            let allDevices = (try? ChromecastDiscovery.discover(timeout: timeout)) ?? []
+            let chromecasts = allDevices.filter { $0.isVideoCapable }
 
-                await MainActor.run {
-                    self.devices = videoDevices
-                    self.isDiscovering = false
+            let rokus = await RokuDiscovery.shared.discover(timeout: 3.0)
 
-                    // Debug: Show discovered devices
-                    self.debugLog("[DISCOVERY] Found \(videoDevices.count) video-capable device(s):")
-                    for device in videoDevices {
-                        self.debugLog("[DISCOVERY]   - \(device.name): \(device.address) (port \(device.port))")
-                    }
+            await MainActor.run {
+                self.devices = chromecasts
+                self.rokuDevices = rokus
+                self.isDiscovering = false
 
-                    // Restore saved device
-                    if let defaultName = try? Config.load().chromecast.defaultDevice {
-                        self.debugLog("[DISCOVERY] Saved device name: \(defaultName)")
-                        self.isLoadingConfig = true
-                        self.selectedDevice = videoDevices.first { $0.name == defaultName }
-                        if let selected = self.selectedDevice {
-                            self.debugLog("[DISCOVERY] Selected device: \(selected.name) @ \(selected.address)")
-                        } else {
-                            self.debugLog("[DISCOVERY] WARNING: Saved device '\(defaultName)' not found in discovered devices")
-                        }
-                        self.isLoadingConfig = false
-                    }
+                // Debug: Show discovered devices
+                self.debugLog("[DISCOVERY] Found \(chromecasts.count) Chromecast(s), \(rokus.count) Roku(s)")
+                for device in chromecasts {
+                    self.debugLog("[DISCOVERY]   - Chromecast: \(device.name) @ \(device.address)")
                 }
-            } catch {
-                await MainActor.run {
-                    self.errorMessage = "Discovery failed: \(error.localizedDescription)"
-                    self.isDiscovering = false
+                for device in rokus {
+                    self.debugLog("[DISCOVERY]   - Roku: \(device.name) @ \(device.address)")
+                }
+
+                // Restore saved Chromecast device
+                if let defaultName = try? Config.load().chromecast.defaultDevice {
+                    self.isLoadingConfig = true
+                    self.selectedDevice = chromecasts.first { $0.name == defaultName }
+                    self.isLoadingConfig = false
+                }
+
+                // Auto-select first Roku if none selected
+                if self.selectedRokuDevice == nil && !rokus.isEmpty {
+                    self.selectedRokuDevice = rokus.first
                 }
             }
         }
@@ -385,36 +401,56 @@ class CastingViewModel: ObservableObject {
             while attempts < maxAttempts {
                 do {
                     var request = URLRequest(url: url)
-                    request.httpMethod = "HEAD"
+                    request.httpMethod = "GET"  // GET to check actual content
                     request.timeoutInterval = 2
-                    let (_, response) = try await URLSession.shared.data(for: request)
+                    let (data, response) = try await URLSession.shared.data(for: request)
 
                     if let httpResponse = response as? HTTPURLResponse {
                         print("DEBUG: pollForStreamReady attempt \(attempts) - status \(httpResponse.statusCode)")
                         if httpResponse.statusCode == 200 {
-                            await MainActor.run {
-                                print("DEBUG: Stream ready! outputType=\(self.outputType), selectedDevice=\(self.selectedDevice?.name ?? "nil"), playerHandle=\(self.playerHandle != nil)")
-                                self.isStreamReady = true
-                                self.statusMessage = "Ready"
+                            // Check if m3u8 has actual segments (not just header)
+                            if let content = String(data: data, encoding: .utf8),
+                               content.contains(".ts") || content.contains(".m4s") {
+                                print("DEBUG: m3u8 has segments, stream is truly ready")
+                                await MainActor.run {
+                                    print("DEBUG: Stream ready! outputType=\(self.outputType), selectedDevice=\(self.selectedDevice?.name ?? "nil"), playerHandle=\(self.playerHandle != nil)")
+                                    self.isStreamReady = true
+                                    self.statusMessage = "Ready"
 
-                                // Auto-start Chromecast playback when stream is ready
-                                if self.outputType == .chromecast && self.selectedDevice != nil && self.playerHandle == nil {
-                                    print("DEBUG: Auto-starting Chromecast playback!")
-                                    Task {
-                                        do {
-                                            try await self.launchPlayer(output: .chromecast, seekTo: 0, paused: false)
-                                            self.statusMessage = "Playing via Chromecast"
-                                            print("DEBUG: Chromecast playback started successfully")
-                                        } catch {
-                                            print("DEBUG: Chromecast playback failed: \(error)")
-                                            self.errorMessage = "Failed to start Chromecast: \(error.localizedDescription)"
+                                    // Auto-start Chromecast playback when stream is ready
+                                    if self.outputType == .chromecast && self.selectedDevice != nil && self.playerHandle == nil {
+                                        print("DEBUG: Auto-starting Chromecast playback!")
+                                        Task {
+                                            do {
+                                                try await self.launchPlayer(output: .chromecast, seekTo: 0, paused: false)
+                                                self.statusMessage = "Playing via Chromecast"
+                                                print("DEBUG: Chromecast playback started successfully")
+                                            } catch {
+                                                print("DEBUG: Chromecast playback failed: \(error)")
+                                                self.errorMessage = "Failed to start Chromecast: \(error.localizedDescription)"
+                                            }
                                         }
                                     }
-                                } else {
-                                    print("DEBUG: NOT auto-starting - conditions not met")
+                                    // Auto-start Roku playback when stream is ready
+                                    else if self.outputType == .roku && self.selectedRokuDevice != nil {
+                                        self.debugLog("[ROKU] Auto-starting Roku playback")
+                                        Task {
+                                            do {
+                                                try await self.launchPlayer(output: .roku, seekTo: 0, paused: false)
+                                                self.debugLog("[ROKU] Playback started successfully")
+                                            } catch {
+                                                self.debugLog("[ROKU] ERROR: \(error)")
+                                                self.errorMessage = "Failed to cast to Roku: \(error.localizedDescription)"
+                                            }
+                                        }
+                                    } else {
+                                        print("DEBUG: NOT auto-starting - conditions not met")
+                                    }
                                 }
+                                return
+                            } else {
+                                print("DEBUG: m3u8 returned 200 but no segments yet")
                             }
-                            return
                         }
                     }
                 } catch {
@@ -648,6 +684,12 @@ class CastingViewModel: ObservableObject {
             }
             let handle = try await launchChromecast(device: device, server: server, seekTo: position, paused: paused)
             playerHandle = handle
+
+        case .roku:
+            guard let device = selectedRokuDevice else {
+                throw PlayerError.disconnected
+            }
+            try await launchRoku(device: device, server: server)
         }
 
         lastKnownPosition = position
@@ -721,6 +763,21 @@ class CastingViewModel: ObservableObject {
         return PlayerHandle(output: .chromecast, player: player, cleanup: {
             client.disconnect()
         })
+    }
+
+    private func launchRoku(device: RokuDevice, server: TranscodeServer) async throws {
+        debugLog("[ROKU] Casting to \(device.name) at \(device.address)")
+        debugLog("[ROKU] Stream URL: \(server.url)")
+
+        let player = RokuPlayer(device: device)
+        let title = currentFile?.lastPathComponent ?? "Beamy Stream"
+
+        debugLog("[ROKU] Sending cast request...")
+        try await player.cast(url: server.url, name: title)
+
+        self.rokuPlayer = player
+        statusMessage = "Casting to \(device.name)"
+        debugLog("[ROKU] Cast successful!")
     }
 
     // MARK: Playback Controls
@@ -900,7 +957,10 @@ class CastingViewModel: ObservableObject {
                 // Start promo image server if not already running
                 if imageServer == nil {
                     // Use absolute path to the backdrop image in source tree
-                    let backdropPath = "/Users/rob/Dev/Beamy/assets/backdrop_1920x1080.jpg"
+                    guard let backdropPath = Bundle.main.path(forResource: "backdrop_1920x1080", ofType: "jpg") else {
+                        print("[PROMO] ERROR: backdrop image not found in bundle")
+                        return
+                    }
                     print("[PROMO] Starting image server with path: \(backdropPath)")
                     imageServer = try ImageServer(imagePath: backdropPath, port: 8081)
                 }
@@ -946,6 +1006,68 @@ class CastingViewModel: ObservableObject {
         }
     }
 
+    private func showPromoOnRoku() {
+        guard let device = selectedRokuDevice else {
+            debugLog("[ROKU-PROMO] No Roku device selected")
+            return
+        }
+
+        debugLog("[ROKU-PROMO] Showing promo on \(device.name)")
+        statusMessage = "Connecting to \(device.name)..."
+
+        Task {
+            do {
+                // Start image stream server (converts image to HLS video)
+                if imageStreamServer == nil {
+                    guard let backdropPath = Bundle.main.path(forResource: "backdrop_1920x1080", ofType: "jpg") else {
+                        debugLog("[ROKU-PROMO] ERROR: backdrop image not found in bundle")
+                        await MainActor.run {
+                            statusMessage = "Ready - Drop a video to cast to \(device.name)"
+                        }
+                        return
+                    }
+                    debugLog("[ROKU-PROMO] Starting image stream server")
+                    imageStreamServer = try ImageStreamServer(imagePath: backdropPath, port: 8082)
+
+                    // Wait for FFmpeg to generate initial segments
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+
+                guard let streamServer = imageStreamServer else {
+                    debugLog("[ROKU-PROMO] ERROR: streamServer is nil")
+                    return
+                }
+
+                debugLog("[ROKU-PROMO] Stream URL: \(streamServer.url)")
+
+                // Cast the HLS stream to Roku
+                let player = RokuPlayer(device: device)
+                try await player.cast(url: streamServer.url, name: "Beamy McBeamface")
+
+                self.rokuPlayer = player
+                debugLog("[ROKU-PROMO] Promo cast successful!")
+
+                await MainActor.run {
+                    statusMessage = "Ready - Drop a video to cast to \(device.name)"
+                }
+            } catch RokuError.limitedMode {
+                // Limited Mode - show helpful error to user
+                debugLog("[ROKU-PROMO] ERROR: Limited Mode detected")
+                await MainActor.run {
+                    errorMessage = RokuError.limitedMode.localizedDescription
+                    statusMessage = "Roku blocked - see error above"
+                }
+            } catch {
+                debugLog("[ROKU-PROMO] ERROR: \(error)")
+                await MainActor.run {
+                    // Other errors - show the error
+                    errorMessage = "Roku: \(error.localizedDescription)"
+                    statusMessage = "Ready - Drop a video to cast to \(device.name)"
+                }
+            }
+        }
+    }
+
     // MARK: Cleanup
 
     private func cleanupPlayer() {
@@ -966,6 +1088,8 @@ class CastingViewModel: ObservableObject {
         transcodeServer = nil
         imageServer?.stop()
         imageServer = nil
+        imageStreamServer?.stop()
+        imageStreamServer = nil
         // Don't disconnect promo client here - let new video client take over the session
         // Disconnecting would stop the receiver since it's the only sender
         print("DEBUG: setting promoCastClient = nil (NOT calling disconnect)")
@@ -1036,6 +1160,8 @@ class CastingViewModel: ObservableObject {
         transcodeServer = nil
         imageServer?.stop()
         imageServer = nil
+        imageStreamServer?.stop()
+        imageStreamServer = nil
         isStreamReady = false
         lastKnownPosition = 0
         lastKnownPaused = true

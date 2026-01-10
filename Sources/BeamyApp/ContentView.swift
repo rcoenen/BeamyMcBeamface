@@ -159,11 +159,6 @@ struct PlaybackControlsView: View {
                     .frame(width: 80, alignment: .trailing)
             }
 
-            // Status message
-            Text(viewModel.statusMessage)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -179,6 +174,7 @@ struct ContentView: View {
     @State private var isTargeted = false
     @State private var showSettings = false
     @State private var showDeviceSelector = false
+    @State private var showRokuSelector = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -208,13 +204,14 @@ struct ContentView: View {
                     )) {
                         Text("Beamy").tag(OutputType.mpv)
                         Text("Chromecast").tag(OutputType.chromecast)
+                        Text("Roku").tag(OutputType.roku)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(width: 200)
+                    .frame(width: 280)
                     .disabled(viewModel.isSwitchingOutput)
 
-                    // Chromecast device selector (or switching indicator)
+                    // Device selector (or switching indicator)
                     if viewModel.isSwitchingOutput {
                         HStack(spacing: 4) {
                             ProgressView()
@@ -228,6 +225,17 @@ struct ContentView: View {
                             HStack(spacing: 4) {
                                 Image(systemName: "tv")
                                 Text(viewModel.selectedDevice?.name ?? "Select device...")
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .frame(width: 200)
+                    } else if viewModel.outputType == .roku {
+                        Button(action: { showRokuSelector = true }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "tv")
+                                Text(viewModel.selectedRokuDevice?.name ?? "Select Roku...")
                                     .lineLimit(1)
                                     .truncationMode(.tail)
                             }
@@ -255,6 +263,10 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showDeviceSelector) {
                 ChromecastSelectorView()
+                    .environmentObject(viewModel)
+            }
+            .sheet(isPresented: $showRokuSelector) {
+                RokuSelectorView()
                     .environmentObject(viewModel)
             }
 
@@ -315,23 +327,38 @@ struct ContentView: View {
                                 // Output indicator
                                 HStack(spacing: 8) {
                                     Image(systemName: viewModel.outputType == .mpv ? "desktopcomputer" : "tv")
-                                    if viewModel.outputType == .mpv {
-                                        Text("Playing locally via mpv")
-                                    } else if let device = viewModel.selectedDevice {
-                                        Text("Casting to \(device.name)")
-                                    } else {
-                                        Text("Chromecast - no device selected")
+                                    switch viewModel.outputType {
+                                    case .mpv:
+                                        Text("Playing locally")
+                                    case .chromecast:
+                                        if let device = viewModel.selectedDevice {
+                                            Text("Casting to \(device.name)")
+                                        } else {
+                                            Text("Chromecast - no device selected")
+                                        }
+                                    case .roku:
+                                        if let device = viewModel.selectedRokuDevice {
+                                            Text("Casting to \(device.name)")
+                                        } else {
+                                            Text("Roku - no device selected")
+                                        }
                                     }
                                 }
                                 .font(.headline)
                                 .foregroundColor(.secondary)
 
-                                // Error message
+                                // Error message (click to copy)
                                 if let error = viewModel.errorMessage {
                                     Text(error)
                                         .foregroundColor(.red)
                                         .font(.caption)
                                         .padding(.horizontal)
+                                        .textSelection(.enabled)
+                                        .onTapGesture {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(error, forType: .string)
+                                        }
+                                        .help("Click to copy")
                                 }
 
                                 Spacer()
@@ -372,6 +399,12 @@ struct ContentView: View {
                             Text(error)
                                 .foregroundColor(.red)
                                 .font(.caption)
+                                .textSelection(.enabled)
+                                .onTapGesture {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(error, forType: .string)
+                                }
+                                .help("Click to copy")
                         }
                     }
                 }

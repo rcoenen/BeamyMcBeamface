@@ -17,6 +17,9 @@ targets:
     platform: macOS
     sources:
       - Sources/BeamyApp
+      - path: assets/backdrop_1920x1080.jpg
+        type: file
+        buildPhase: resources
     dependencies:
       - package: Beamy
         product: BeamyKit
@@ -45,7 +48,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.beamy.mcbeamface
         PRODUCT_NAME: Beamy McBeamface
-        MARKETING_VERSION: "0.2.0"
+        MARKETING_VERSION: "0.2.1"
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: Sources/BeamyApp/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
