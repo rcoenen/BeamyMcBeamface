@@ -273,11 +273,11 @@ struct BeamyApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        // Settings window
-        Settings {
-            SettingsView()
-                .environmentObject(viewModel)
-        }
+        // Settings window (hidden for now)
+        // Settings {
+        //     SettingsView()
+        //         .environmentObject(viewModel)
+        // }
     }
 }
 
