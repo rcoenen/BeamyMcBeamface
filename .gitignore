@@ -26,3 +26,4 @@ test-chromecast.swift
 
 # FFmpeg binaries (built via scripts/build-ffmpeg.sh)
 bin/
+BeamyMcBeamface-*.dmg

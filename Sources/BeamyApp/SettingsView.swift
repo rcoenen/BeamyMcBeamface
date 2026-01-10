@@ -2,55 +2,51 @@ import SwiftUI
 import BeamyKit
 
 struct SettingsView: View {
-    @EnvironmentObject var viewModel: CastingViewModel
     @Environment(\.dismiss) var dismiss
-    @State private var audioBitrate: String = "192k"
 
     var body: some View {
-        Form {
-            Section {
-                HStack {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                        .font(.title2)
-                    VStack(alignment: .leading) {
-                        Text("FFmpeg Bundled")
-                            .font(.headline)
-                        Text("Using hardware-accelerated VideoToolbox encoding")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
+        VStack(spacing: 20) {
+            // App info
+            VStack(spacing: 8) {
+                Image(systemName: "play.rectangle.fill")
+                    .font(.system(size: 48))
+                    .foregroundColor(.accentColor)
 
-            Section("Audio") {
-                Picker("Audio Bitrate", selection: $audioBitrate) {
-                    Text("128k").tag("128k")
-                    Text("192k").tag("192k")
-                    Text("256k").tag("256k")
-                    Text("320k").tag("320k")
-                }
-            }
+                Text("Beamy McBeamface")
+                    .font(.title2)
+                    .fontWeight(.semibold)
 
-            Section("About") {
-                Text("Beamy McBeamface v0.2")
-                    .font(.headline)
-                Divider()
+                Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.top, 8)
+
+            Divider()
+                .padding(.horizontal)
+
+            // Technical info
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Video: Apple VideoToolbox (H.264)", systemImage: "film")
+                Label("Audio: Apple AudioToolbox (AAC)", systemImage: "speaker.wave.2")
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+
+            Spacer()
+
+            // FFmpeg attribution
+            VStack(spacing: 4) {
                 Text("This software uses FFmpeg under the LGPL v2.1")
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundColor(.secondary)
-                Link("FFmpeg Project", destination: URL(string: "https://ffmpeg.org")!)
-                    .font(.caption)
-                Text("Video encoding: Apple VideoToolbox (H.264)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("Audio encoding: Apple AudioToolbox (AAC)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                Link("ffmpeg.org", destination: URL(string: "https://ffmpeg.org")!)
+                    .font(.caption2)
             }
+            .padding(.bottom, 8)
         }
         .padding()
-        .frame(width: 400, height: 280)
+        .frame(width: 280, height: 260)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Done") {
@@ -58,25 +54,9 @@ struct SettingsView: View {
                 }
             }
         }
-        .onAppear {
-            loadConfig()
-        }
-        .onChange(of: audioBitrate) { _ in saveConfig() }
-    }
-
-    private func loadConfig() {
-        let config = (try? Config.load()) ?? Config.default
-        audioBitrate = config.ffmpeg.audioBitrate
-    }
-
-    private func saveConfig() {
-        guard var config = try? Config.load() else { return }
-        config.ffmpeg.audioBitrate = audioBitrate
-        try? config.save()
     }
 }
 
 #Preview {
     SettingsView()
-        .environmentObject(CastingViewModel())
 }

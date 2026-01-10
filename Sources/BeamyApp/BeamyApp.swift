@@ -308,7 +308,12 @@ private struct AboutView: View {
             Text("Beamy McBeamface")
                 .font(.system(size: 28, weight: .semibold))
 
-            Text("Version 0.1")
+            Text("Beaming is Streaming!")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .italic()
+
+            Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
                 .font(.system(.body, design: .monospaced))
                 .foregroundColor(.secondary)
 
@@ -353,14 +358,8 @@ private struct AboutView: View {
 
             Spacer()
 
-            VStack(spacing: 2) {
-                Text("Free & Open Source Software")
-                    .font(.caption)
-                    .fontWeight(.medium)
-                Link("github.com/rcoenen/BeamyMcBeamface", destination: URL(string: "https://github.com/rcoenen/BeamyMcBeamface")!)
-                    .font(.caption)
-            }
-            .foregroundColor(.secondary)
+            Link("github.com/rcoenen/BeamyMcBeamface", destination: URL(string: "https://github.com/rcoenen/BeamyMcBeamface")!)
+                .font(.caption)
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
