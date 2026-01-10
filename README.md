@@ -29,7 +29,9 @@
 
 ## ⬇️ Download
 
-1. **[Download the latest release](https://github.com/rcoenen/BeamyMcBeamface/releases/latest)**
+**[Download v0.2.0](https://github.com/rcoenen/BeamyMcBeamface/releases/latest)** · [Changelog](CHANGELOG.md)
+
+1. Download the DMG from the link above
 2. Drag `Beamy McBeamface.app` to your Applications folder
 3. Done!
 
