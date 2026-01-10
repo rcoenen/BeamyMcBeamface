@@ -79,6 +79,17 @@ struct SettingsView: View {
                     }
                     .disabled(!hasChangesFromDefaults)
                 }
+
+                Section("About") {
+                    Text("This software uses FFmpeg under the LGPL v2.1")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Link("FFmpeg Project", destination: URL(string: "https://ffmpeg.org")!)
+                        .font(.caption)
+                    Text("Video encoding: Apple VideoToolbox")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
         .padding()
         .frame(width: 450, height: 350)

@@ -113,10 +113,9 @@ public enum FFmpeg {
         process.executableURL = URL(fileURLWithPath: getFFmpegPath())
         process.arguments = [
             "-i", input.path,
-            "-c:v", "libx264",
-            "-preset", cfg.preset,
-            "-crf", "\(cfg.crf)",
-            "-c:a", "aac",
+            "-c:v", "h264_videotoolbox",
+            "-b:v", "4M",
+            "-c:a", "aac_at",
             "-b:a", cfg.audioBitrate,
             "-movflags", "+faststart",
             "-y",

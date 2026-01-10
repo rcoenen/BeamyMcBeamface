@@ -16,6 +16,22 @@ public final class TranscodeServer: @unchecked Sendable {
     private var ffmpegProcess: Process?
     private var currentSeekPosition: TimeInterval = 0
     private let ioQueue = DispatchQueue(label: "com.beamy.transcoder.io", qos: .userInitiated)
+    private let logPath = "/tmp/beamy-ffmpeg.log"
+
+    private func log(_ message: String) {
+        let msg = "[\(Date())] \(message)\n"
+        if let data = msg.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logPath) {
+                if let handle = FileHandle(forWritingAtPath: logPath) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    handle.closeFile()
+                }
+            } else {
+                FileManager.default.createFile(atPath: logPath, contents: data)
+            }
+        }
+    }
 
     /// Current pause state (based on FFmpeg process signals)
     public private(set) var isPaused: Bool = false
@@ -195,8 +211,13 @@ public final class TranscodeServer: @unchecked Sendable {
 
     /// Start FFmpeg at the given position and write HLS output to disk.
     private func startFFmpeg(at position: TimeInterval) {
+        log("startFFmpeg called with position: \(position)")
         ioQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                // Can't log here - self is nil
+                return
+            }
+            self.log("ioQueue block executing")
 
             // Kill any existing process
             if let process = ffmpegProcess, process.isRunning {
@@ -234,24 +255,19 @@ public final class TranscodeServer: @unchecked Sendable {
             // Progress output to stderr (parsed for position feedback)
             args += ["-progress", "pipe:2", "-stats_period", "0.5"]
 
-            // Video settings
+            // Video settings - use VideoToolbox hardware encoder
+            // Note: Don't specify profile/level - VideoToolbox picks optimal settings
             args += [
                 "-map", "0:v:0",
                 "-map", "0:a:0?",  // Optional audio
                 "-sn",
-                "-c:v", "libx264",
-                "-profile:v", "baseline",
-                "-level", "3.1",
-                "-preset", config.preset,
-                "-crf", "\(config.crf)",
-                "-g", "60",  // GOP of 60 frames (2 sec at 30fps, matches hls_time)
-                "-keyint_min", "60",
-                "-sc_threshold", "0",
+                "-c:v", "h264_videotoolbox",
+                "-b:v", "4M",  // Target bitrate for VideoToolbox
             ]
 
-            // Audio settings
+            // Audio settings - use AudioToolbox AAC encoder
             args += [
-                "-c:a", "aac",
+                "-c:a", "aac_at",
                 "-ac", "2",
                 "-ar", "44100",
                 "-b:a", config.audioBitrate,
@@ -289,11 +305,16 @@ public final class TranscodeServer: @unchecked Sendable {
             }
 
             do {
+                log("Starting FFmpeg: \(config.ffmpegPath)")
+                log("HLS dir: \(hlsDirectory.path)")
+                log("Args: \(args.joined(separator: " "))")
                 try ffmpeg.run()
                 self.ffmpegProcess = ffmpeg
                 self.isPaused = false
                 self.notifyFFmpegStateChange(true)
+                log("FFmpeg started with PID: \(ffmpeg.processIdentifier)")
             } catch {
+                log("FFmpeg FAILED to start: \(error)")
                 self.notifyFFmpegStateChange(false)
             }
         }

@@ -154,6 +154,13 @@ public struct Config: Codable {
 }
 
 private func findExecutable(_ name: String) -> String? {
+    // First, check for bundled binary in app bundle
+    if let bundlePath = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent(name).path,
+       FileManager.default.fileExists(atPath: bundlePath) {
+        return bundlePath
+    }
+
+    // Fall back to system paths
     let paths = [
         "/opt/homebrew/bin/\(name)",  // ARM Mac
         "/usr/local/bin/\(name)",      // Intel Mac

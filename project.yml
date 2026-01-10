@@ -20,6 +20,27 @@ targets:
     dependencies:
       - package: Beamy
         product: BeamyKit
+    preBuildScripts:
+      - name: Check FFmpeg binaries
+        script: |
+          if [ ! -f "$SRCROOT/bin/ffmpeg" ]; then
+            echo "error: FFmpeg binaries not found. Run: ./scripts/build-ffmpeg.sh"
+            exit 1
+          fi
+        basedOnDependencyAnalysis: false
+    postCompileScripts:
+      - name: Copy FFmpeg binaries
+        script: |
+          mkdir -p "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH"
+          cp "$SRCROOT/bin/ffmpeg" "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/"
+          cp "$SRCROOT/bin/ffprobe" "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/"
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(SRCROOT)/bin/ffmpeg
+          - $(SRCROOT)/bin/ffprobe
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/ffmpeg
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/ffprobe
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.beamy.mcbeamface

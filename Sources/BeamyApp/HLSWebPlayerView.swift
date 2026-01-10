@@ -103,11 +103,17 @@ struct HLSWebPlayerView: NSViewRepresentable {
                     log('error: ' + err);
                 });
 
-                video.addEventListener('loadeddata', function() {
-                    log('loadeddata');
+                video.addEventListener('loadeddata', function() { log('loadeddata'); });
+                video.addEventListener('canplaythrough', function() {
+                    log('canplaythrough');
                     video.play();
                 });
                 video.addEventListener('playing', function() { log('playing'); });
+                video.addEventListener('pause', function() { log('paused'); });
+                video.addEventListener('play', function() { log('play event'); });
+                video.addEventListener('waiting', function() { log('waiting/buffering'); });
+                video.addEventListener('stalled', function() { log('stalled'); });
+                video.addEventListener('ended', function() { log('ended'); });
 
                 function loadStream(url) {
                     log('load: ' + url);
@@ -174,30 +180,53 @@ struct HLSWebPlayerView: NSViewRepresentable {
             }
         }
 
+        /// Poll for stream ready and load. Skips if same URL already loaded.
         func pollAndLoad(url: URL) {
-            guard currentURL != url else { return }
-            currentURL = url
+            // Use base URL (without query params) for comparison to avoid duplicate loads
+            let baseURL = URL(string: url.absoluteString.split(separator: "?").first.map(String.init) ?? url.absoluteString)
+            guard currentURL != baseURL else { return }
+            forcePollAndLoad(url: url)
+        }
+
+        /// Force poll and load, even if same base URL. Used for seeks.
+        func forcePollAndLoad(url: URL) {
+            // Store base URL to prevent SwiftUI re-triggering
+            currentURL = URL(string: url.absoluteString.split(separator: "?").first.map(String.init) ?? url.absoluteString)
             debugLog("pollAndLoad: \(url.absoluteString)")
 
-            // Poll until stream is ready, then load
+            // Poll until we have enough buffered content (6+ seconds = 3+ segments at 2s each)
             Task {
                 var attempts = 0
                 while attempts < 60 {  // 30 seconds max
                     do {
                         var request = URLRequest(url: url)
-                        request.httpMethod = "HEAD"
                         request.timeoutInterval = 2
-                        let (_, response) = try await URLSession.shared.data(for: request)
-                        if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                            debugLog("Stream ready, loading into WebView")
-                            await MainActor.run {
-                                if self.isReady {
-                                    self.loadInWebView(url: url)
-                                } else {
-                                    self.pendingURL = url
+                        let (data, response) = try await URLSession.shared.data(for: request)
+                        if let http = response as? HTTPURLResponse, http.statusCode == 200,
+                           let playlist = String(data: data, encoding: .utf8) {
+                            // Parse total duration from EXTINF tags
+                            let extinfPattern = try? NSRegularExpression(pattern: "#EXTINF:([\\d.]+),")
+                            let matches = extinfPattern?.matches(in: playlist, range: NSRange(playlist.startIndex..., in: playlist)) ?? []
+                            var totalDuration: Double = 0
+                            for match in matches {
+                                if let range = Range(match.range(at: 1), in: playlist),
+                                   let duration = Double(playlist[range]) {
+                                    totalDuration += duration
                                 }
                             }
-                            return
+                            if totalDuration >= 6.0 {
+                                debugLog("Stream ready with \(String(format: "%.1f", totalDuration))s buffered")
+                                await MainActor.run {
+                                    if self.isReady {
+                                        self.loadInWebView(url: url)
+                                    } else {
+                                        self.pendingURL = url
+                                    }
+                                }
+                                return
+                            } else {
+                                debugLog("Stream has \(String(format: "%.1f", totalDuration))s, waiting for 6s...")
+                            }
                         }
                     } catch {
                         // Not ready yet
@@ -267,7 +296,14 @@ struct HLSWebPlayerView: NSViewRepresentable {
         }
 
         func togglePause() {
-            webView?.evaluateJavaScript("video.paused ? play() : pause()", completionHandler: nil)
+            debugLog("togglePause called")
+            webView?.evaluateJavaScript("video.paused ? play() : pause()") { result, error in
+                if let error = error {
+                    debugLog("togglePause error: \(error)")
+                } else {
+                    debugLog("togglePause success")
+                }
+            }
         }
 
         func seek(to time: TimeInterval) {

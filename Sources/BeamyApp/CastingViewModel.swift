@@ -299,13 +299,39 @@ class CastingViewModel: ObservableObject {
         }
     }
 
+    private func logDebug(_ message: String) {
+        let msg = "[\(Date())] \(message)\n"
+        if let data = msg.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: "/tmp/beamy-transcoder.log") {
+                if let handle = FileHandle(forWritingAtPath: "/tmp/beamy-transcoder.log") {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    handle.closeFile()
+                }
+            } else {
+                FileManager.default.createFile(atPath: "/tmp/beamy-transcoder.log", contents: data)
+            }
+        }
+    }
+
     /// Called by WebView when it's ready to receive the stream
     func startTranscoderForEmbedded() {
-        guard useEmbeddedPlayer && outputType == .mpv else { return }
-        guard transcodeServer == nil else { return }  // Already running
-        guard let url = currentFile, let info = mediaInfo else { return }
+        logDebug("[TRANSCODER] startTranscoderForEmbedded called")
+        logDebug("[TRANSCODER] useEmbeddedPlayer=\(useEmbeddedPlayer), outputType=\(outputType)")
+        guard useEmbeddedPlayer && outputType == .mpv else {
+            logDebug("[TRANSCODER] GUARD FAILED: wrong mode")
+            return
+        }
+        guard transcodeServer == nil else {
+            logDebug("[TRANSCODER] GUARD FAILED: transcodeServer already exists")
+            return
+        }
+        guard let url = currentFile, let info = mediaInfo else {
+            logDebug("[TRANSCODER] GUARD FAILED: no file or mediaInfo")
+            return
+        }
 
-        print("DEBUG: Starting transcoder for embedded playback (embeddedMode=true)")
+        logDebug("[TRANSCODER] Starting transcoder for file: \(url.path)")
         let port = findAvailablePort()
 
         do {
@@ -819,13 +845,16 @@ class CastingViewModel: ObservableObject {
     private func performEmbeddedArbitrarySeek(to time: TimeInterval, server: TranscodeServer) {
         isArbitrarySeeking = true
         statusMessage = "Seeking..."
-        embeddedCurrentTime = time
-        embeddedSeekOffset = time
+        embeddedCurrentTime = 0  // Reset - new stream starts at 0
+        embeddedSeekOffset = time  // Offset tracks the seek position
+
+        // Immediately pause to freeze current frame
+        hlsWebPlayerCoordinator?.pause()
 
         // Restart transcoder at target position and reload WebView with cache-busted URL.
         server.seek(to: time, awaitClientReconnect: false)
         let cacheBustedURL = cacheBustURL(server.url)
-        hlsWebPlayerCoordinator?.pollAndLoad(url: cacheBustedURL)
+        hlsWebPlayerCoordinator?.forcePollAndLoad(url: cacheBustedURL)
     }
 
     private func cacheBustURL(_ url: URL) -> URL {

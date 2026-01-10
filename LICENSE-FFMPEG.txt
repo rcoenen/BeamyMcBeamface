@@ -1,0 +1,21 @@
+FFmpeg License
+==============
+
+This software uses FFmpeg (https://ffmpeg.org) licensed under the
+GNU Lesser General Public License version 2.1 or later (LGPL v2.1+).
+
+FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.
+
+The FFmpeg source code can be obtained from:
+https://ffmpeg.org/download.html
+
+This build of FFmpeg includes the following components:
+- libavcodec, libavformat, libavutil, libavfilter, libswscale, libswresample
+- VideoToolbox hardware acceleration (Apple)
+- AudioToolbox audio encoding (Apple)
+
+No GPL-licensed components (such as libx264 or libx265) are included
+in this build, ensuring LGPL v2.1+ compliance.
+
+For the full LGPL v2.1 license text, see:
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
