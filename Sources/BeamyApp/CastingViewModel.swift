@@ -73,6 +73,7 @@ class CastingViewModel: ObservableObject {
     }
     @Published var isSwitchingOutput = false
     @Published var statusMessage: String = "Drop a video file to start"
+    @Published var toastMessage: String?
     @Published var useEmbeddedPlayer: Bool = true  // AVPlayer embedded playback
 
     // Embedded player state (for AVPlayerView binding)
@@ -103,9 +104,10 @@ class CastingViewModel: ObservableObject {
 
     // Position tracking
     private var lastKnownPosition: TimeInterval = 0
-    private var lastKnownPaused: Bool = true
+    @Published private var lastKnownPaused: Bool = true
     private var chromecastSeekOffset: TimeInterval = 0
     private var embeddedSeekOffset: TimeInterval = 0
+    @Published private var rokuSeekOffset: TimeInterval = 0
     var embeddedPlayerCoordinator: AVPlayerView.Coordinator?
     var mpvPlayerCoordinator: MpvPlayerView.Coordinator?
     var hlsWebPlayerCoordinator: HLSWebPlayerView.Coordinator?
@@ -117,6 +119,10 @@ class CastingViewModel: ObservableObject {
         if useEmbeddedPlayer && outputType == .mpv {
             return embeddedIsPlaying
         }
+        // For Roku, use lastKnownPaused state (no player handle)
+        if outputType == .roku && rokuPlayer != nil {
+            return !lastKnownPaused
+        }
         guard let player = playerHandle?.player else { return false }
         return !((try? player.isPaused()) ?? true)
     }
@@ -125,6 +131,10 @@ class CastingViewModel: ObservableObject {
         // For embedded AVPlayer, use the binding state
         if useEmbeddedPlayer && outputType == .mpv {
             return embeddedSeekOffset + embeddedCurrentTime
+        }
+        // For Roku, use seek offset (no position tracking from device)
+        if outputType == .roku && rokuPlayer != nil {
+            return rokuSeekOffset
         }
         guard let player = playerHandle?.player else { return lastKnownPosition }
 
@@ -181,6 +191,16 @@ class CastingViewModel: ObservableObject {
             handle.seekToEndOfFile()
             handle.write(data)
             try? handle.close()
+        }
+    }
+
+    func showToast(_ message: String) {
+        toastMessage = message
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)  // 1.5 seconds
+            if toastMessage == message {
+                toastMessage = nil
+            }
         }
     }
 
@@ -640,6 +660,13 @@ class CastingViewModel: ObservableObject {
             return
         }
 
+        // If switching to Roku but no device selected, don't switch yet
+        if newOutput == .roku && selectedRokuDevice == nil {
+            outputType = newOutput
+            statusMessage = "Select a Roku device"
+            return
+        }
+
         isSwitchingOutput = true
         statusMessage = "Switching output..."
 
@@ -776,6 +803,8 @@ class CastingViewModel: ObservableObject {
         try await player.cast(url: server.url, name: title)
 
         self.rokuPlayer = player
+        self.lastKnownPaused = false
+        self.rokuSeekOffset = 0
         statusMessage = "Casting to \(device.name)"
         debugLog("[ROKU] Cast successful!")
     }
@@ -789,6 +818,24 @@ class CastingViewModel: ObservableObject {
             return
         }
 
+        // Roku path - uses ECP keypress
+        if outputType == .roku, let player = rokuPlayer {
+            Task {
+                do {
+                    try await player.playPause()
+                    await MainActor.run {
+                        lastKnownPaused.toggle()
+                        debugLog("[ROKU] Play/Pause sent, now \(lastKnownPaused ? "paused" : "playing")")
+                    }
+                } catch {
+                    await MainActor.run {
+                        errorMessage = "Roku control error: \(error.localizedDescription)"
+                    }
+                }
+            }
+            return
+        }
+
         // If no player, launch one first
         if playerHandle == nil {
             guard transcodeServer != nil else { return }
@@ -796,6 +843,12 @@ class CastingViewModel: ObservableObject {
             // For Chromecast, need device selected
             if outputType == .chromecast && selectedDevice == nil {
                 statusMessage = "Select a Chromecast device first"
+                return
+            }
+
+            // For Roku, need device selected
+            if outputType == .roku && selectedRokuDevice == nil {
+                statusMessage = "Select a Roku device first"
                 return
             }
 
@@ -825,11 +878,39 @@ class CastingViewModel: ObservableObject {
     }
 
     func skipForward() {
+        // Roku uses ECP keypress for skip (no precise seek)
+        if outputType == .roku, let player = rokuPlayer {
+            Task {
+                do {
+                    try await player.fastForward()
+                    debugLog("[ROKU] Fast forward sent")
+                } catch {
+                    await MainActor.run {
+                        errorMessage = "Roku control error: \(error.localizedDescription)"
+                    }
+                }
+            }
+            return
+        }
         let target = currentTime + 10
         seek(to: target)
     }
 
     func skipBackward() {
+        // Roku uses ECP keypress for skip (no precise seek)
+        if outputType == .roku, let player = rokuPlayer {
+            Task {
+                do {
+                    try await player.rewind()
+                    debugLog("[ROKU] Rewind sent")
+                } catch {
+                    await MainActor.run {
+                        errorMessage = "Roku control error: \(error.localizedDescription)"
+                    }
+                }
+            }
+            return
+        }
         let target = max(0, currentTime - 10)
         seek(to: target)
     }
@@ -840,6 +921,28 @@ class CastingViewModel: ObservableObject {
 
         if useEmbeddedPlayer && outputType == .mpv {
             performEmbeddedSeek(to: clamped)
+            return
+        }
+
+        // Roku seek - restart transcode at new position and recast
+        if outputType == .roku, let player = rokuPlayer, let server = transcodeServer {
+            rokuSeekOffset = clamped  // Update immediately for UI
+            Task {
+                do {
+                    debugLog("[ROKU] Seeking to \(clamped)s - restarting stream")
+                    server.seek(to: clamped, awaitClientReconnect: true)
+                    let title = currentFile?.lastPathComponent ?? "Beamy Stream"
+                    try await player.recast(url: server.url, name: title)  // Skip receiver launch
+                    await MainActor.run {
+                        lastKnownPaused = false  // Roku resumes playing after recast
+                        debugLog("[ROKU] Seek complete, now playing")
+                    }
+                } catch {
+                    await MainActor.run {
+                        errorMessage = "Roku seek error: \(error.localizedDescription)"
+                    }
+                }
+            }
             return
         }
 

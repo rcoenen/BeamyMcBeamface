@@ -347,18 +347,25 @@ struct ContentView: View {
                                 .font(.headline)
                                 .foregroundColor(.secondary)
 
-                                // Error message (click to copy)
+                                // Error message (double-click to copy)
                                 if let error = viewModel.errorMessage {
-                                    Text(error)
-                                        .foregroundColor(.red)
-                                        .font(.caption)
-                                        .padding(.horizontal)
-                                        .textSelection(.enabled)
-                                        .onTapGesture {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString(error, forType: .string)
+                                    VStack(spacing: 4) {
+                                        Text(error)
+                                            .foregroundColor(.red)
+                                            .font(.caption)
+                                            .padding(.horizontal)
+                                            .onTapGesture(count: 2) {
+                                                NSPasteboard.general.clearContents()
+                                                NSPasteboard.general.setString(error, forType: .string)
+                                                viewModel.showToast("Copied to clipboard")
+                                            }
+                                            .help("Double-click to copy")
+                                        if viewModel.toastMessage != nil {
+                                            Text("Copied to clipboard")
+                                                .font(.caption2)
+                                                .foregroundColor(.green)
                                         }
-                                        .help("Click to copy")
+                                    }
                                 }
 
                                 Spacer()
@@ -396,15 +403,22 @@ struct ContentView: View {
                             .foregroundColor(.secondary)
 
                         if let error = viewModel.errorMessage {
-                            Text(error)
-                                .foregroundColor(.red)
-                                .font(.caption)
-                                .textSelection(.enabled)
-                                .onTapGesture {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(error, forType: .string)
+                            VStack(spacing: 4) {
+                                Text(error)
+                                    .foregroundColor(.red)
+                                    .font(.caption)
+                                    .onTapGesture(count: 2) {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(error, forType: .string)
+                                        viewModel.showToast("Copied to clipboard")
+                                    }
+                                    .help("Double-click to copy")
+                                if viewModel.toastMessage != nil {
+                                    Text("Copied to clipboard")
+                                        .font(.caption2)
+                                        .foregroundColor(.green)
                                 }
-                                .help("Click to copy")
+                            }
                         }
                     }
                 }
