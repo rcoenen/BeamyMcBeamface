@@ -10,6 +10,35 @@ enum OutputType: String, CaseIterable {
     case roku = "roku"
 }
 
+// MARK: - Roku Setup Status
+
+enum RokuSetupStatus: Equatable {
+    case notSelected
+    case checking
+    case limitedMode
+    case receiverNotInstalled
+    case ready
+
+    var message: String? {
+        switch self {
+        case .notSelected:
+            return "Select a Roku device"
+        case .checking:
+            return "Checking Roku setup..."
+        case .limitedMode:
+            return "On your Roku: Settings → System → Advanced system settings → Control by mobile apps → Enabled"
+        case .receiverNotInstalled:
+            return "On your Roku: Channel Store → Find 'Web Video Caster' → Install the Receiver app"
+        case .ready:
+            return nil
+        }
+    }
+
+    var canDropVideo: Bool {
+        self == .ready
+    }
+}
+
 // MARK: - Player Handle
 
 private struct PlayerHandle {
@@ -37,12 +66,15 @@ class CastingViewModel: ObservableObject {
     }
     @Published var selectedRokuDevice: RokuDevice? {
         didSet {
-            // Show promo on Roku when device selected but no video loaded
-            if selectedRokuDevice != nil && outputType == .roku && currentFile == nil {
-                showPromoOnRoku()
+            // Check Roku setup when device selected
+            if selectedRokuDevice != nil && outputType == .roku {
+                checkRokuSetup()
+            } else if selectedRokuDevice == nil {
+                rokuSetupStatus = .notSelected
             }
         }
     }
+    @Published var rokuSetupStatus: RokuSetupStatus = .notSelected
     @Published var currentFile: URL?
     @Published var mediaInfo: MediaInfo?
     @Published var duration: TimeInterval = 0
@@ -57,9 +89,13 @@ class CastingViewModel: ObservableObject {
                 showPromoOnChromecast()
             }
 
-            // Show promo when switching TO Roku (if device selected but no video)
-            if outputType == .roku && selectedRokuDevice != nil && currentFile == nil {
-                showPromoOnRoku()
+            // Check Roku setup when switching TO Roku
+            if outputType == .roku {
+                if selectedRokuDevice != nil {
+                    checkRokuSetup()
+                } else {
+                    rokuSetupStatus = .notSelected
+                }
             }
 
             // Disconnect from Chromecast when switching TO Beamy
@@ -790,6 +826,50 @@ class CastingViewModel: ObservableObject {
         return PlayerHandle(output: .chromecast, player: player, cleanup: {
             client.disconnect()
         })
+    }
+
+    // MARK: Roku Setup Check
+
+    func checkRokuSetup() {
+        guard let device = selectedRokuDevice else {
+            rokuSetupStatus = .notSelected
+            return
+        }
+
+        rokuSetupStatus = .checking
+        debugLog("[ROKU] Checking setup for \(device.name)...")
+
+        Task {
+            let player = RokuPlayer(device: device)
+
+            // Check 1: Is ECP enabled (not in Limited Mode)?
+            if await player.checkLimitedMode() {
+                await MainActor.run {
+                    rokuSetupStatus = .limitedMode
+                    debugLog("[ROKU] Setup check: Limited Mode detected")
+                }
+                return
+            }
+
+            // Check 2: Is Web Video Caster Receiver installed?
+            if !(await player.checkWebVideoCasterInstalled()) {
+                await MainActor.run {
+                    rokuSetupStatus = .receiverNotInstalled
+                    debugLog("[ROKU] Setup check: Web Video Caster not installed")
+                }
+                return
+            }
+
+            // All checks passed
+            await MainActor.run {
+                rokuSetupStatus = .ready
+                debugLog("[ROKU] Setup check: Ready!")
+                // Show promo now that setup is complete
+                if currentFile == nil {
+                    showPromoOnRoku()
+                }
+            }
+        }
     }
 
     private func launchRoku(device: RokuDevice, server: TranscodeServer) async throws {

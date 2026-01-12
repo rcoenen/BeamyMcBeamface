@@ -256,7 +256,7 @@ public enum RokuError: Error, LocalizedError {
         case .mediaPlayerNotInstalled:
             return "Roku Media Player not installed. Go to Channel Store → Search 'Roku Media Player' → Install"
         case .webVideoCasterNotInstalled:
-            return "Web Video Caster Receiver not installed. Go to Roku Channel Store → Search 'Web Video Caster' → Install the Receiver app"
+            return "Web Video Caster Receiver not installed. Go to Roku Channel Store → Find 'Web Video Caster' → Install the Receiver app"
         }
     }
 }

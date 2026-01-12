@@ -378,45 +378,79 @@ struct ContentView: View {
                             .environmentObject(viewModel)
                     }
                 } else {
-                    // Drop zone
+                    // Drop zone - check if Roku is ready
+                    let rokuBlocked = viewModel.outputType == .roku && !viewModel.rokuSetupStatus.canDropVideo
+
                     Rectangle()
                         .fill(Color(nsColor: .controlBackgroundColor))
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
                                 .strokeBorder(
-                                    isTargeted ? Color.blue : Color.gray.opacity(0.3),
+                                    rokuBlocked ? Color.orange.opacity(0.5) :
+                                    (isTargeted ? Color.blue : Color.gray.opacity(0.3)),
                                     style: StrokeStyle(lineWidth: 3, dash: [10])
                                 )
                                 .padding(8)
                         )
 
                     VStack(spacing: 16) {
-                        Image(systemName: "arrow.down.doc")
-                            .font(.system(size: 48))
-                            .foregroundColor(.secondary)
-                        Text("Drop a video file to start")
-                            .font(.title2)
-                            .foregroundColor(.primary)
+                        if rokuBlocked {
+                            // Roku setup required
+                            Image(systemName: "tv.badge.exclamationmark")
+                                .font(.system(size: 48))
+                                .foregroundColor(.orange)
+                            Text("Roku Setup Required")
+                                .font(.title2)
+                                .foregroundColor(.primary)
 
-                        Text("Supported: MP4, MKV, WEBM, MOV, AVI")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        if let error = viewModel.errorMessage {
-                            VStack(spacing: 4) {
-                                Text(error)
-                                    .foregroundColor(.red)
+                            if let message = viewModel.rokuSetupStatus.message {
+                                Text(message)
                                     .font(.caption)
-                                    .onTapGesture(count: 2) {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(error, forType: .string)
-                                        viewModel.showToast("Copied to clipboard")
+                                    .foregroundColor(.orange)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 40)
+                            }
+
+                            if viewModel.rokuSetupStatus != .checking {
+                                Button("Check Again") {
+                                    viewModel.checkRokuSetup()
+                                }
+                                .buttonStyle(.bordered)
+                                .padding(.top, 8)
+                            } else {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                    .padding(.top, 8)
+                            }
+                        } else {
+                            // Normal drop zone
+                            Image(systemName: "arrow.down.doc")
+                                .font(.system(size: 48))
+                                .foregroundColor(.secondary)
+                            Text("Drop a video file to start")
+                                .font(.title2)
+                                .foregroundColor(.primary)
+
+                            Text("Supported: MP4, MKV, WEBM, MOV, AVI")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            if let error = viewModel.errorMessage {
+                                VStack(spacing: 4) {
+                                    Text(error)
+                                        .foregroundColor(.red)
+                                        .font(.caption)
+                                        .onTapGesture(count: 2) {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(error, forType: .string)
+                                            viewModel.showToast("Copied to clipboard")
+                                        }
+                                        .help("Double-click to copy")
+                                    if viewModel.toastMessage != nil {
+                                        Text("Copied to clipboard")
+                                            .font(.caption2)
+                                            .foregroundColor(.green)
                                     }
-                                    .help("Double-click to copy")
-                                if viewModel.toastMessage != nil {
-                                    Text("Copied to clipboard")
-                                        .font(.caption2)
-                                        .foregroundColor(.green)
                                 }
                             }
                         }
@@ -432,6 +466,11 @@ struct ContentView: View {
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        // Block drops when Roku is selected but not ready
+        if viewModel.outputType == .roku && !viewModel.rokuSetupStatus.canDropVideo {
+            return false
+        }
+
         guard let provider = providers.first else {
             return false
         }
