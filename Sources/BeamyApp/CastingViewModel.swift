@@ -144,6 +144,7 @@ class CastingViewModel: ObservableObject {
     private var chromecastSeekOffset: TimeInterval = 0
     private var embeddedSeekOffset: TimeInterval = 0
     @Published private var rokuSeekOffset: TimeInterval = 0
+    private var rokuPlaybackStartTime: Date?  // When Roku playback started (for estimating position)
     var embeddedPlayerCoordinator: AVPlayerView.Coordinator?
     var mpvPlayerCoordinator: MpvPlayerView.Coordinator?
     var hlsWebPlayerCoordinator: HLSWebPlayerView.Coordinator?
@@ -168,9 +169,16 @@ class CastingViewModel: ObservableObject {
         if useEmbeddedPlayer && outputType == .mpv {
             return embeddedSeekOffset + embeddedCurrentTime
         }
-        // For Roku, use seek offset (no position tracking from device)
+        // For Roku, estimate position based on elapsed time (Roku can't report position)
         if outputType == .roku && rokuPlayer != nil {
-            return rokuSeekOffset
+            if lastKnownPaused {
+                return rokuSeekOffset
+            }
+            guard let startTime = rokuPlaybackStartTime else {
+                return rokuSeekOffset
+            }
+            let elapsed = Date().timeIntervalSince(startTime)
+            return min(rokuSeekOffset + elapsed, duration)
         }
         guard let player = playerHandle?.player else { return lastKnownPosition }
 
@@ -885,6 +893,7 @@ class CastingViewModel: ObservableObject {
         self.rokuPlayer = player
         self.lastKnownPaused = false
         self.rokuSeekOffset = 0
+        self.rokuPlaybackStartTime = Date()
         statusMessage = "Casting to \(device.name)"
         debugLog("[ROKU] Cast successful!")
     }
@@ -904,6 +913,17 @@ class CastingViewModel: ObservableObject {
                 do {
                     try await player.playPause()
                     await MainActor.run {
+                        if lastKnownPaused {
+                            // Resuming - restart the timer
+                            rokuPlaybackStartTime = Date()
+                        } else {
+                            // Pausing - save estimated position
+                            if let startTime = rokuPlaybackStartTime {
+                                let elapsed = Date().timeIntervalSince(startTime)
+                                rokuSeekOffset = min(rokuSeekOffset + elapsed, duration)
+                            }
+                            rokuPlaybackStartTime = nil
+                        }
                         lastKnownPaused.toggle()
                         debugLog("[ROKU] Play/Pause sent, now \(lastKnownPaused ? "paused" : "playing")")
                     }
@@ -1011,10 +1031,31 @@ class CastingViewModel: ObservableObject {
                 do {
                     debugLog("[ROKU] Seeking to \(clamped)s - restarting stream")
                     server.seek(to: clamped, awaitClientReconnect: true)
+
+                    // Wait for the HLS playlist to have segments before recasting
+                    let streamURL = server.url
+                    var ready = false
+                    for _ in 0..<30 {  // Max 3 seconds
+                        if let data = try? Data(contentsOf: streamURL),
+                           let playlist = String(data: data, encoding: .utf8),
+                           playlist.contains(".ts") {
+                            ready = true
+                            break
+                        }
+                        try await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+                    }
+
+                    if !ready {
+                        debugLog("[ROKU] Warning: Stream not ready after 3s, trying anyway")
+                    } else {
+                        debugLog("[ROKU] Stream ready, recasting")
+                    }
+
                     let title = currentFile?.lastPathComponent ?? "Beamy Stream"
-                    try await player.recast(url: server.url, name: title)  // Skip receiver launch
+                    try await player.recast(url: streamURL, name: title)  // Skip receiver launch
                     await MainActor.run {
                         lastKnownPaused = false  // Roku resumes playing after recast
+                        rokuPlaybackStartTime = Date()  // Reset timer for position estimation
                         debugLog("[ROKU] Seek complete, now playing")
                     }
                 } catch {

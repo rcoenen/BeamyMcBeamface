@@ -21,6 +21,15 @@ That's it! Beamy can now cast to your Roku.
 
 ---
 
+## TODO: Test Next Session
+
+- [ ] Drop video, let it play, verify progress bar advances
+- [ ] Seek → should resume playing (no more 404 error)
+- [ ] Pause/resume → progress should stay accurate
+- [ ] Seek while paused → should resume from new position
+
+---
+
 ## Technical Notes
 
 ### Current Status: WORKING via Web Video Caster Receiver
@@ -97,6 +106,18 @@ POST /keypress/Pause
 POST /keypress/Rev      # Rewind
 POST /keypress/Fwd      # Fast forward
 ```
+
+## Known Limitations
+
+### Progress Bar is Estimated
+Roku's Web Video Caster protocol does not report the current playback position back to the client. Beamy estimates the progress by tracking elapsed time since playback started. This means:
+- The progress bar may drift slightly from the actual position
+- Pausing/resuming resets the estimate
+- Seeking restarts the estimate from the new position
+- If the Roku buffers or stalls, the estimate will be inaccurate
+
+### Seeking Shows Brief Splash Screen
+When seeking, Beamy must restart the HLS stream at the new position. This causes the Web Video Caster Receiver to briefly show its splash screen before resuming playback. This is unavoidable with the current protocol.
 
 ## Failed Approaches
 
