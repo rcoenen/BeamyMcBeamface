@@ -217,6 +217,71 @@ public final class RokuPlayer: Sendable {
     public func home() async throws {
         try await sendKey(.home)
     }
+
+    /// Query the media player state (position, duration, play state)
+    public func queryMediaPlayer() async -> RokuMediaStatus? {
+        let queryURL = URL(string: "\(device.baseURL)/query/media-player")!
+
+        var request = URLRequest(url: queryURL)
+        request.timeoutInterval = 2  // Short timeout for polling
+
+        do {
+            let (data, _) = try await session.data(for: request)
+            guard let xml = String(data: data, encoding: .utf8) else { return nil }
+
+            // Parse state attribute: <player state="play" ...>
+            let state: RokuPlayState
+            if xml.contains("state=\"play\"") {
+                state = .playing
+            } else if xml.contains("state=\"pause\"") {
+                state = .paused
+            } else if xml.contains("state=\"stop\"") || xml.contains("state=\"none\"") {
+                state = .stopped
+            } else {
+                state = .unknown
+            }
+
+            // Parse position: <position>85118 ms</position>
+            var positionMs: Int?
+            if let range = xml.range(of: "<position>"),
+               let endRange = xml.range(of: "</position>") {
+                let posStr = xml[range.upperBound..<endRange.lowerBound]
+                    .replacingOccurrences(of: " ms", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+                positionMs = Int(posStr)
+            }
+
+            // Check for error
+            let hasError = xml.contains("error=\"true\"")
+
+            return RokuMediaStatus(
+                state: state,
+                positionMs: positionMs,
+                hasError: hasError
+            )
+        } catch {
+            return nil
+        }
+    }
+}
+
+/// Roku media player status from /query/media-player
+public struct RokuMediaStatus: Sendable {
+    public let state: RokuPlayState
+    public let positionMs: Int?
+    public let hasError: Bool
+
+    public var positionSeconds: TimeInterval? {
+        guard let ms = positionMs else { return nil }
+        return TimeInterval(ms) / 1000.0
+    }
+}
+
+public enum RokuPlayState: Sendable {
+    case playing
+    case paused
+    case stopped
+    case unknown
 }
 
 public enum RokuKey: String {

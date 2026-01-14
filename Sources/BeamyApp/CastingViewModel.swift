@@ -144,7 +144,8 @@ class CastingViewModel: ObservableObject {
     private var chromecastSeekOffset: TimeInterval = 0
     private var embeddedSeekOffset: TimeInterval = 0
     @Published private var rokuSeekOffset: TimeInterval = 0
-    private var rokuPlaybackStartTime: Date?  // When Roku playback started (for estimating position)
+    @Published private var rokuPolledPosition: TimeInterval?  // Actual position from Roku polling
+    private var rokuPollingTask: Task<Void, Never>?
     var embeddedPlayerCoordinator: AVPlayerView.Coordinator?
     var mpvPlayerCoordinator: MpvPlayerView.Coordinator?
     var hlsWebPlayerCoordinator: HLSWebPlayerView.Coordinator?
@@ -169,16 +170,12 @@ class CastingViewModel: ObservableObject {
         if useEmbeddedPlayer && outputType == .mpv {
             return embeddedSeekOffset + embeddedCurrentTime
         }
-        // For Roku, estimate position based on elapsed time (Roku can't report position)
+        // For Roku, use polled position (falls back to seek offset if polling not yet available)
         if outputType == .roku && rokuPlayer != nil {
-            if lastKnownPaused {
-                return rokuSeekOffset
+            if let polled = rokuPolledPosition {
+                return polled + rokuSeekOffset  // Add seek offset for seeks that haven't been polled yet
             }
-            guard let startTime = rokuPlaybackStartTime else {
-                return rokuSeekOffset
-            }
-            let elapsed = Date().timeIntervalSince(startTime)
-            return min(rokuSeekOffset + elapsed, duration)
+            return rokuSeekOffset
         }
         guard let player = playerHandle?.player else { return lastKnownPosition }
 
@@ -893,9 +890,63 @@ class CastingViewModel: ObservableObject {
         self.rokuPlayer = player
         self.lastKnownPaused = false
         self.rokuSeekOffset = 0
-        self.rokuPlaybackStartTime = Date()
+        self.rokuPolledPosition = nil
+        startRokuPolling()
         statusMessage = "Casting to \(device.name)"
         debugLog("[ROKU] Cast successful!")
+    }
+
+    /// Start polling Roku for playback position and state
+    private func startRokuPolling() {
+        stopRokuPolling()
+        debugLog("[ROKU] Starting position polling...")
+        rokuPollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self = self, let player = self.rokuPlayer else {
+                    print("[ROKU-POLL] No self or player, exiting")
+                    break
+                }
+
+                if let status = await player.queryMediaPlayer() {
+                    await MainActor.run {
+                        // Update position
+                        if let pos = status.positionSeconds {
+                            self.rokuPolledPosition = pos
+                            // Log every 5 seconds
+                            if Int(pos) % 5 == 0 {
+                                print("[ROKU-POLL] Position: \(pos)s")
+                            }
+                        }
+
+                        // Update play state from Roku
+                        switch status.state {
+                        case .playing:
+                            if self.lastKnownPaused {
+                                self.lastKnownPaused = false
+                                self.debugLog("[ROKU-POLL] State: playing")
+                            }
+                        case .paused:
+                            if !self.lastKnownPaused {
+                                self.lastKnownPaused = true
+                                self.debugLog("[ROKU-POLL] State: paused")
+                            }
+                        case .stopped:
+                            self.debugLog("[ROKU-POLL] State: stopped")
+                        case .unknown:
+                            break
+                        }
+                    }
+                }
+
+                try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
+            }
+        }
+    }
+
+    /// Stop polling Roku
+    private func stopRokuPolling() {
+        rokuPollingTask?.cancel()
+        rokuPollingTask = nil
     }
 
     // MARK: Playback Controls
@@ -907,23 +958,13 @@ class CastingViewModel: ObservableObject {
             return
         }
 
-        // Roku path - uses ECP keypress
+        // Roku path - uses ECP keypress, polling will update state
         if outputType == .roku, let player = rokuPlayer {
             Task {
                 do {
                     try await player.playPause()
                     await MainActor.run {
-                        if lastKnownPaused {
-                            // Resuming - restart the timer
-                            rokuPlaybackStartTime = Date()
-                        } else {
-                            // Pausing - save estimated position
-                            if let startTime = rokuPlaybackStartTime {
-                                let elapsed = Date().timeIntervalSince(startTime)
-                                rokuSeekOffset = min(rokuSeekOffset + elapsed, duration)
-                            }
-                            rokuPlaybackStartTime = nil
-                        }
+                        // Toggle immediately for responsive UI, polling will correct if needed
                         lastKnownPaused.toggle()
                         debugLog("[ROKU] Play/Pause sent, now \(lastKnownPaused ? "paused" : "playing")")
                     }
@@ -1055,7 +1096,7 @@ class CastingViewModel: ObservableObject {
                     try await player.recast(url: streamURL, name: title)  // Skip receiver launch
                     await MainActor.run {
                         lastKnownPaused = false  // Roku resumes playing after recast
-                        rokuPlaybackStartTime = Date()  // Reset timer for position estimation
+                        rokuPolledPosition = nil  // Reset polling, will pick up new position
                         debugLog("[ROKU] Seek complete, now playing")
                     }
                 } catch {
@@ -1297,6 +1338,8 @@ class CastingViewModel: ObservableObject {
     private func cleanupPlayer() {
         playerHandle?.cleanup()
         playerHandle = nil
+        stopRokuPolling()
+        rokuPlayer = nil
     }
 
     func stopPlayback() {
@@ -1344,6 +1387,12 @@ class CastingViewModel: ObservableObject {
         positionTimer = nil
         transcodeServer?.stop()
         transcodeServer = nil
+
+        // Stop Roku polling
+        stopRokuPolling()
+        rokuPlayer = nil
+        rokuSeekOffset = 0
+        rokuPolledPosition = nil
 
         // Reset playback state
         isStreamReady = false
