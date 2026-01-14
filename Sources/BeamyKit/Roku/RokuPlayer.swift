@@ -218,6 +218,21 @@ public final class RokuPlayer: Sendable {
         try await sendKey(.home)
     }
 
+    /// Go to home screen (synchronous, for app termination)
+    public func homeSync() {
+        let keyURL = URL(string: "\(device.baseURL)/keypress/Home")!
+        var request = URLRequest(url: keyURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 2
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let task = URLSession.shared.dataTask(with: request) { _, _, _ in
+            semaphore.signal()
+        }
+        task.resume()
+        _ = semaphore.wait(timeout: .now() + 2)
+    }
+
     /// Query the media player state (position, duration, play state)
     public func queryMediaPlayer() async -> RokuMediaStatus? {
         let queryURL = URL(string: "\(device.baseURL)/query/media-player")!

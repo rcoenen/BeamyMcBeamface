@@ -66,6 +66,7 @@ class CastingViewModel: ObservableObject {
     }
     @Published var selectedRokuDevice: RokuDevice? {
         didSet {
+            saveSelectedRokuDevice()
             // Check Roku setup when device selected
             if selectedRokuDevice != nil && outputType == .roku {
                 checkRokuSetup()
@@ -253,6 +254,7 @@ class CastingViewModel: ObservableObject {
             switch savedOutput {
             case "mpv": outputType = .mpv
             case "chromecast": outputType = .chromecast
+            case "roku": outputType = .roku
             default: break
             }
         }
@@ -264,6 +266,13 @@ class CastingViewModel: ObservableObject {
         guard !isLoadingConfig else { return }
         guard var config = try? Config.load() else { return }
         config.chromecast.defaultDevice = selectedDevice?.name
+        try? config.save()
+    }
+
+    private func saveSelectedRokuDevice() {
+        guard !isLoadingConfig else { return }
+        guard var config = try? Config.load() else { return }
+        config.roku.defaultDevice = selectedRokuDevice?.name
         try? config.save()
     }
 
@@ -310,9 +319,18 @@ class CastingViewModel: ObservableObject {
                     self.isLoadingConfig = false
                 }
 
-                // Auto-select first Roku if none selected
-                if self.selectedRokuDevice == nil && !rokus.isEmpty {
-                    self.selectedRokuDevice = rokus.first
+                // Restore saved Roku device (only if not already selected)
+                if self.selectedRokuDevice == nil,
+                   let defaultName = try? Config.load().roku.defaultDevice {
+                    self.debugLog("[DISCOVERY] Restoring Roku device: '\(defaultName)'")
+                    self.isLoadingConfig = true
+                    if let device = rokus.first(where: { $0.name == defaultName }) {
+                        self.selectedRokuDevice = device
+                        self.debugLog("[DISCOVERY] Restored Roku: \(device.name)")
+                    } else if !rokus.isEmpty {
+                        self.debugLog("[DISCOVERY] Roku '\(defaultName)' not found, have \(rokus.count) device(s)")
+                    }
+                    self.isLoadingConfig = false
                 }
             }
         }
@@ -1423,6 +1441,9 @@ class CastingViewModel: ObservableObject {
         try? promoCastClient?.stopMedia()
         promoCastClient?.disconnect()
         promoCastClient = nil
+
+        // Stop Roku playback - send Home to exit the receiver app (sync to complete before exit)
+        rokuPlayer?.homeSync()
 
         cleanupPlayer()
         mpvPlayerCoordinator?.stop()

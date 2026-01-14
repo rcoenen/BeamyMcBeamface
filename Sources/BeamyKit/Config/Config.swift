@@ -5,19 +5,22 @@ public struct Config: Codable {
     public var ffmpeg: FFmpegConfig
     public var server: ServerConfig
     public var chromecast: ChromecastConfig
+    public var roku: RokuConfig
     public var ui: UIConfig
 
     enum CodingKeys: String, CodingKey {
         case ffmpeg
         case server
         case chromecast
+        case roku
         case ui
     }
 
-    public init(ffmpeg: FFmpegConfig, server: ServerConfig, chromecast: ChromecastConfig, ui: UIConfig) {
+    public init(ffmpeg: FFmpegConfig, server: ServerConfig, chromecast: ChromecastConfig, roku: RokuConfig, ui: UIConfig) {
         self.ffmpeg = ffmpeg
         self.server = server
         self.chromecast = chromecast
+        self.roku = roku
         self.ui = ui
     }
 
@@ -26,6 +29,7 @@ public struct Config: Codable {
         ffmpeg = try container.decodeIfPresent(FFmpegConfig.self, forKey: .ffmpeg) ?? .default
         server = try container.decodeIfPresent(ServerConfig.self, forKey: .server) ?? .default
         chromecast = try container.decodeIfPresent(ChromecastConfig.self, forKey: .chromecast) ?? .default
+        roku = try container.decodeIfPresent(RokuConfig.self, forKey: .roku) ?? .default
         ui = try container.decodeIfPresent(UIConfig.self, forKey: .ui) ?? .default
     }
 
@@ -34,6 +38,7 @@ public struct Config: Codable {
         try container.encode(ffmpeg, forKey: .ffmpeg)
         try container.encode(server, forKey: .server)
         try container.encode(chromecast, forKey: .chromecast)
+        try container.encode(roku, forKey: .roku)
         try container.encode(ui, forKey: .ui)
     }
 
@@ -79,6 +84,14 @@ public struct Config: Codable {
         }
     }
 
+    public struct RokuConfig: Codable {
+        public var defaultDevice: String?
+
+        public static var `default`: RokuConfig {
+            RokuConfig(defaultDevice: nil)
+        }
+    }
+
     public struct UIConfig: Codable {
         /// "mpv" or "chromecast"
         public var defaultOutput: String?
@@ -93,6 +106,7 @@ public struct Config: Codable {
             ffmpeg: .default,
             server: .default,
             chromecast: .default,
+            roku: .default,
             ui: .default
         )
     }
