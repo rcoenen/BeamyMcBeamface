@@ -21,13 +21,13 @@ That's it! Beamy can now cast to your Roku.
 
 ---
 
-## TODO: Test Next Session
+## Completed Tests
 
-- [ ] Drop video, verify progress bar shows real position from Roku polling
-- [ ] Seek → should resume playing (no more 404 error)
-- [ ] Pause via Roku remote → Beamy UI should update to show paused
-- [ ] Resume via Roku remote → Beamy UI should update to show playing
-- [ ] Verify polling logs in /tmp/beamy-debug.log
+- [x] Drop video, verify progress bar shows real position from Roku polling
+- [x] Seek → resumes playing (fixed 404 error by waiting for stream ready)
+- [x] Pause via Roku remote → Beamy UI updates to show paused
+- [x] Resume via Roku remote → Beamy UI updates to show playing
+- [x] Position polling via `/query/media-player` endpoint works
 
 ---
 

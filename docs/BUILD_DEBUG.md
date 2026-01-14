@@ -2,14 +2,28 @@
 
 ## Build
 
+**Release build** (recommended for testing):
 ```sh
-xcodebuild -project BeamyMcBeamface.xcodeproj -scheme BeamyMcBeamface -configuration Debug build
+xcodebuild -scheme BeamyMcBeamface -configuration Release -derivedDataPath .build/DerivedData build
 ```
+
+**Debug build**:
+```sh
+xcodebuild -scheme BeamyMcBeamface -configuration Debug -derivedDataPath .build/DerivedData build
+```
+
+> **Note:** This project uses xcodebuild, not `swift build`. The `-derivedDataPath .build/DerivedData` flag keeps build artifacts in the project directory.
 
 ## Run the Latest Build
 
+**Release**:
 ```sh
-open "/Users/$USER/Library/Developer/Xcode/DerivedData/BeamyMcBeamface-*/Build/Products/Debug/Beamy McBeamface.app"
+open ".build/DerivedData/Build/Products/Release/Beamy McBeamface.app"
+```
+
+**Debug**:
+```sh
+open ".build/DerivedData/Build/Products/Debug/Beamy McBeamface.app"
 ```
 
 ## Debug Notes
