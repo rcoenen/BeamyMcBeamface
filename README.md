@@ -23,7 +23,7 @@
 - ⚡ **Hardware-accelerated** — Uses Apple VideoToolbox for fast encoding
 - 🆓 **100% free & open source** — No subscriptions, no ads, no BS
 
-> *Apple TV support coming soon. Maybe. lol*
+> 🟡 **Roku support is in active development** — available now in the experimental build on the `roku` branch. Solid playback, seek, and device discovery working. Try it if you're feeling adventurous!
 
 ---
 
@@ -78,6 +78,14 @@ Since macOS 26 (Tahoe), Apple made Gatekeeper stricter for unsigned apps. The ol
 Beamy transcodes your video on-the-fly and streams it to your TV. The Chromecast just plays the stream — no special codecs needed on the TV side.
 
 For the nerdy details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
+
+## Volume Control
+
+**Volume is controlled by your TV remote, not the app.** This is a deliberate design choice.
+
+Chromecast, Roku, and other streaming devices all have different ideas about who should control volume — some support it, some don't, some only work with certain TV setups (CEC). Rather than adding buggy, inconsistent volume controls, Beamy keeps things simple: use your TV remote or the physical buttons on your device.
 
 ---
 
