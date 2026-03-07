@@ -23,7 +23,13 @@
 - ⚡ **Hardware-accelerated** — Uses Apple VideoToolbox for fast encoding
 - 🆓 **100% free & open source** — No subscriptions, no ads, no BS
 
-> 🟡 **Roku support is in active development** — available now in the experimental build on the `roku` branch. Solid playback, seek, and device discovery working. Try it if you're feeling adventurous!
+## Device Support
+
+| Device | Status | Notes |
+|--------|--------|-------|
+| Chromecast | ✅ Full support | Stable, works great |
+| Roku | 🧪 Experimental | See [`roku` branch](https://github.com/rcoenen/BeamyMcBeamface/tree/roku) — playback, seek & discovery working |
+| Apple TV | 🤷 Maybe | No promises |
 
 ---
 
