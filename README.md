@@ -28,7 +28,7 @@
 | Device | Status | Notes |
 |--------|--------|-------|
 | Chromecast | ✅ Full support | Stable, works great |
-| Roku | 🧪 Experimental | See [`roku` branch](https://github.com/rcoenen/BeamyMcBeamface/tree/roku) — playback, seek & discovery working |
+| Roku | 🧪 Experimental | See [`roku` branch](https://github.com/rcoenen/BeamyMcBeamface/tree/roku) — relies on "borrowing" the [Web Video Caster Receiver](https://www.roku.com/en-us/channels/259656) channel |
 | Apple TV | 🤷 Maybe | No promises |
 
 ---
